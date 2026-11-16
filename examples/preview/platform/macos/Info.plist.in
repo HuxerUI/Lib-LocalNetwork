@@ -22,5 +22,9 @@
   <string>APPL</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Connect to another device to verify the local network connection.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_huxer-lan._tcp</string>
+  </array>
 </dict>
 </plist>

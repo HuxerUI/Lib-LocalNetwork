@@ -168,6 +168,7 @@ Task<IoResult<ScannedInvitation>> ReadInvitationQr(File image) {
 #endif
 }
 
+#if !defined(HUXERUI_LOCALNETWORK_PREVIEW_IOS_CAMERA)
 #ifdef __ANDROID__
 void InstallQrCamera(ApplicationContext& context) {
   android::JavaWindowPlatformModuleFactory<std::shared_ptr<QrCamera>> factory;
@@ -191,5 +192,6 @@ Task<IoResult<bool>> CaptureQrPhoto(File destination) {
   co_return IoResult<bool>::Failure({IoErrorCode::Unsupported, "Camera capture is unavailable."});
 #endif
 }
+#endif
 
 } // namespace local_network_preview

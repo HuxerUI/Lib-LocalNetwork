@@ -53,6 +53,9 @@ if (APPLE AND NOT IOS)
     )
     list(APPEND LIBRARY_SOURCE_FILES ${LIBRARY_MACOS_SOURCE_FILES})
 endif ()
+if (IOS)
+    list(APPEND LIBRARY_SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/src/discovery.cpp")
+endif ()
 if (EMSCRIPTEN)
     file(GLOB_RECURSE LIBRARY_WEB_SOURCE_FILES CONFIGURE_DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/platform/web/src/*.cpp"
@@ -96,6 +99,10 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(huxerui_localnetwork PRIVATE HUXERUI_LOCALNETWORK_AVAHI)
         target_link_libraries(huxerui_localnetwork PRIVATE PkgConfig::LOCALNETWORK_AVAHI)
     endif ()
+endif ()
+
+if (IOS OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_compile_definitions(huxerui_localnetwork PRIVATE HUXERUI_LOCALNETWORK_BONJOUR)
 endif ()
 
 if (WIN32 OR ANDROID OR IOS OR CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux)$")

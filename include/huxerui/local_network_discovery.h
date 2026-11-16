@@ -4,8 +4,9 @@
 /// @brief Local DNS-SD browsing, endpoint resolution, and service publication.
 ///
 /// Include <huxerui/local_network_discovery.h> and link HuxerUI::LocalNetwork. DNS-SD uses the Windows DNS Service
-/// API, Android NSD, or Avahi on Linux when the Avahi client is available at build time. On Android, register
-/// Install() as an application hook and run the tasks in the initialized host.
+/// API, Android NSD, Bonjour on macOS and iOS, or Avahi on Linux when the Avahi client is available at build time.
+/// On Android, register Install() as an application hook and run the tasks in the initialized host.
+/// Apple hosts declare the Bonjour service types they use and supply a local network usage description.
 /// Launch the tasks through a TaskScope from application work such as a UI event.
 /// Discovery identifies candidate endpoints. Authenticate the peer separately before exchanging application data.
 
@@ -33,7 +34,8 @@ struct DiscoveredService {
   std::string type;
   /// Opaque instance identifier used by ResolveServiceAsync(). Keep it with type and scope.
   std::string instance;
-  /// Platform resolution scope. Windows and Linux use an interface index. Android uses a system network handle.
+  /// Platform resolution scope. Windows, macOS, iOS, and Linux use an interface index.
+  /// Android uses a system network handle.
   /// Zero means the browse result came without a specific scope.
   std::uint64_t scope = 0;
 };
@@ -49,6 +51,7 @@ struct ResolvedService {
 /// @brief A service announcement in the local DNS-SD domain.
 struct ServiceAnnouncement {
   /// A single nonempty UTF-8 instance label of up to 63 bytes. Dots and embedded NUL bytes are rejected.
+  /// The system may append a suffix to distinguish services with the same label.
   std::string name;
   /// TCP service type using the same syntax as BrowseServicesAsync().
   std::string type;
@@ -102,8 +105,8 @@ Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService servi
 
 /// @brief Publishes an active TCP listener on the local network.
 ///
-/// Windows and Linux publish on the interface that owns the supplied address. Android scopes publication to the
-/// matching network when the system API supports it.
+/// Windows, macOS, iOS, and Linux publish on the interface that owns the supplied address.
+/// Android scopes publication to the matching network when the system API supports it.
 /// @param announcement Instance label, TCP service type, and the listener's concrete endpoint.
 /// @return A lazy task yielding an owning registration. Failure leaves the listener available for direct dialing.
 Task<NetworkResult<ServicePublication>> PublishServiceAsync(ServiceAnnouncement announcement);

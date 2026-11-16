@@ -24,6 +24,12 @@ constexpr char service_type[] = "_huxer-lan._tcp";
 #ifdef __ANDROID__
 constexpr char service_name[] = "LocalNetwork Android";
 constexpr bool has_qr_camera = true;
+#elif defined(HUXERUI_LOCALNETWORK_PREVIEW_IOS_CAMERA)
+constexpr char service_name[] = "LocalNetwork iOS";
+constexpr bool has_qr_camera = true;
+#elif defined(__APPLE__)
+constexpr char service_name[] = "LocalNetwork macOS";
+constexpr bool has_qr_camera = false;
 #elif defined(__linux__)
 constexpr char service_name[] = "LocalNetwork Linux";
 constexpr bool has_qr_camera = false;

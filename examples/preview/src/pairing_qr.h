@@ -18,9 +18,9 @@ huxerui::Bitmap MakeInvitationQr(const huxerui::localnetwork::Endpoint& endpoint
 huxerui::Task<huxerui::IoResult<ScannedInvitation>> ReadInvitationQr(huxerui::FileReference image);
 /// Reads a pairing invitation from an app-accessible image file.
 huxerui::Task<huxerui::IoResult<ScannedInvitation>> ReadInvitationQr(huxerui::File image);
-/// Registers Android's system camera capture bridge for Preview.
+/// Registers the Preview's system camera integration on Android and iOS.
 void InstallQrCamera(huxerui::ApplicationContext& context);
-/// Captures to the app's temporary QR directory on Android. A successful false means no photo was returned.
+/// Captures a QR photo to the app's temporary directory. A successful false means no photo was returned.
 huxerui::Task<huxerui::IoResult<bool>> CaptureQrPhoto(huxerui::File destination);
 
 } // namespace local_network_preview
