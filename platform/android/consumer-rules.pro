@@ -1,0 +1,1 @@
+-keep class org.huxerui.lib.localnetwork.DiscoveryModule { public <init>(); }

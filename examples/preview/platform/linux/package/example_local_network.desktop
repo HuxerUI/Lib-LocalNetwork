@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=LocalNetwork Preview
+Exec=example_local_network
+Icon=example_local_network
+Categories=Utility;
+Terminal=false

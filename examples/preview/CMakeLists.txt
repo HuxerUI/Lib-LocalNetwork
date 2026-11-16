@@ -1,0 +1,69 @@
+cmake_minimum_required(VERSION 3.20)
+
+# CMake initializes Apple deployment defaults during the first project() call.
+# Explicit settings and toolchains retain ownership of their target platform.
+if (CMAKE_HOST_APPLE AND (NOT CMAKE_SYSTEM_NAME OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        AND NOT CMAKE_TOOLCHAIN_FILE AND "$ENV{CMAKE_TOOLCHAIN_FILE}" STREQUAL ""
+        AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND "$ENV{MACOSX_DEPLOYMENT_TARGET}" STREQUAL "")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS deployment target")
+endif ()
+
+project(example_local_network VERSION 0.1.0 LANGUAGES NONE)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/HuxerUIProject.cmake")
+if (HUXERUI_PROJECT_PLAN_ONLY)
+    return()
+endif ()
+
+file(GLOB_RECURSE APP_SOURCE_FILES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cxx"
+)
+if (NOT HUXERUI_LIBRARY_GRAPH_ONLY)
+    if (WIN32)
+        list(APPEND APP_SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/platform/windows/main.cpp")
+    elseif (APPLE AND NOT IOS)
+        list(APPEND APP_SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/platform/macos/main.cpp")
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND APP_SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux/main.cpp")
+    endif ()
+endif ()
+
+huxerui_add_app(example_local_network
+        SOURCES
+            ${APP_SOURCE_FILES}
+        RESOURCES
+            resources
+        RESOURCE_NAMESPACE
+            app
+        ${HUXERUI_APP_RESOURCE_OUTPUT_ARGUMENTS}
+        BUNDLE_NAME
+            "LocalNetwork Preview"
+        BUNDLE_IDENTIFIER
+            "org.huxerui.lib.localnetwork.preview"
+)
+
+huxerui_configure_project_app(example_local_network)
+
+huxerui_use_library(example_local_network
+        TARGET HuxerUI::LocalNetwork
+        PATH "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+
+if (TARGET MbedTLS::mbedcrypto)
+    target_compile_definitions(example_local_network PRIVATE HUXERUI_LOCALNETWORK_PREVIEW_TLS)
+    target_link_libraries(example_local_network PRIVATE MbedTLS::mbedcrypto)
+endif ()
+
+if (WIN32 AND NOT HUXERUI_LIBRARY_GRAPH_ONLY)
+    target_compile_definitions(example_local_network PRIVATE NOMINMAX)
+    target_link_libraries(example_local_network PRIVATE crypt32)
+endif ()
+
+if ((WIN32 OR ANDROID) AND NOT HUXERUI_LIBRARY_GRAPH_ONLY)
+    include(cmake/PreviewQr.cmake)
+    huxerui_localnetwork_preview_qr()
+    target_compile_definitions(example_local_network PRIVATE HUXERUI_LOCALNETWORK_PREVIEW_QR)
+    target_link_libraries(example_local_network PRIVATE ZXing::ZXing)
+endif ()
