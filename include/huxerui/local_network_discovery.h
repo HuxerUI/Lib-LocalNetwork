@@ -3,8 +3,9 @@
 /// @file
 /// @brief Local DNS-SD browsing, endpoint resolution, and service publication.
 ///
-/// Include <huxerui/local_network_discovery.h> and link HuxerUI::LocalNetwork. DNS-SD is implemented on Windows
-/// and Android. On Android, register Install() as an application hook and run the tasks in the initialized host.
+/// Include <huxerui/local_network_discovery.h> and link HuxerUI::LocalNetwork. DNS-SD uses the Windows DNS Service
+/// API, Android NSD, or Avahi on Linux when the Avahi client is available at build time. On Android, register
+/// Install() as an application hook and run the tasks in the initialized host.
 /// Launch the tasks through a TaskScope from application work such as a UI event.
 /// Discovery identifies candidate endpoints. Authenticate the peer separately before exchanging application data.
 
@@ -32,7 +33,7 @@ struct DiscoveredService {
   std::string type;
   /// Opaque instance identifier used by ResolveServiceAsync(). Keep it with type and scope.
   std::string instance;
-  /// Platform resolution scope. On Windows it is an interface index. On Android it is a system network handle.
+  /// Platform resolution scope. Windows and Linux use an interface index. Android uses a system network handle.
   /// Zero means the browse result came without a specific scope.
   std::uint64_t scope = 0;
 };
@@ -77,7 +78,7 @@ private:
 };
 
 /// @brief Reports whether DNS-SD is implemented on the current platform.
-/// @return True on Windows and Android. System permissions and network availability still apply.
+/// @return True when the current build includes a DNS-SD backend. Linux operations also require the Avahi service.
 bool IsDiscoverySupported() noexcept;
 
 /// @brief Browses for local services during a bounded observation window.
@@ -101,7 +102,7 @@ Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService servi
 
 /// @brief Publishes an active TCP listener on the local network.
 ///
-/// Windows publishes on the interface that owns the supplied address. Android scopes publication to the
+/// Windows and Linux publish on the interface that owns the supplied address. Android scopes publication to the
 /// matching network when the system API supports it.
 /// @param announcement Instance label, TCP service type, and the listener's concrete endpoint.
 /// @return A lazy task yielding an owning registration. Failure leaves the listener available for direct dialing.

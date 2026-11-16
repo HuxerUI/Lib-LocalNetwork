@@ -22,7 +22,7 @@ bool ValidName(std::string_view name) {
 
 NetworkError InvalidService() { return {NetworkErrorCode::InvalidEndpoint, 0, "Invalid DNS-SD service details."}; }
 
-#if !defined(_WIN32) && !defined(__ANDROID__)
+#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(HUXERUI_LOCALNETWORK_AVAHI)
 NetworkError Unsupported() { return {NetworkErrorCode::Unsupported, 0, "DNS-SD is unavailable on this platform."}; }
 #endif
 
@@ -43,7 +43,7 @@ ServicePublication::~ServicePublication() { Close(); }
 void ServicePublication::Close() noexcept { if (auto state = std::exchange(state_, {})) state->Close(); }
 
 bool IsDiscoverySupported() noexcept {
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(HUXERUI_LOCALNETWORK_AVAHI)
   return true;
 #else
   return false;
@@ -56,7 +56,7 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowseServicesAsync(
   if (!ValidType(type) || observation <= std::chrono::milliseconds::zero() || observation > std::chrono::seconds(10)) {
     co_return Result::Failure(InvalidService());
   }
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(HUXERUI_LOCALNETWORK_AVAHI)
   co_return co_await detail::BrowsePlatformServices(std::move(type), observation);
 #else
   co_return Result::Failure(Unsupported());
@@ -68,7 +68,7 @@ Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService servi
   if (!ValidType(service.type) || service.instance.empty() || service.instance.find('\0') != std::string::npos) {
     co_return Result::Failure(InvalidService());
   }
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(HUXERUI_LOCALNETWORK_AVAHI)
   co_return co_await detail::ResolvePlatformService(std::move(service));
 #else
   co_return Result::Failure(Unsupported());
@@ -81,7 +81,7 @@ Task<NetworkResult<ServicePublication>> PublishServiceAsync(ServiceAnnouncement 
       announcement.endpoint.host.find('\0') != std::string::npos || announcement.endpoint.port == 0) {
     co_return Result::Failure(InvalidService());
   }
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(HUXERUI_LOCALNETWORK_AVAHI)
   auto published = co_await detail::PublishPlatformService(std::move(announcement));
   if (!published.Succeeded()) co_return Result::Failure(std::move(published).Error());
   co_return Result::Success(ServicePublication(std::move(published).Value()));

@@ -61,7 +61,7 @@ if (WIN32 AND NOT HUXERUI_LIBRARY_GRAPH_ONLY)
     target_link_libraries(example_local_network PRIVATE crypt32)
 endif ()
 
-if ((WIN32 OR ANDROID) AND NOT HUXERUI_LIBRARY_GRAPH_ONLY)
+if ((WIN32 OR ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND NOT HUXERUI_LIBRARY_GRAPH_ONLY)
     include(cmake/PreviewQr.cmake)
     huxerui_localnetwork_preview_qr()
     target_compile_definitions(example_local_network PRIVATE HUXERUI_LOCALNETWORK_PREVIEW_QR)
