@@ -30,3 +30,36 @@ function(huxerui_localnetwork_configure_tls)
     endif ()
     add_subdirectory("${source_dir}" "${CMAKE_CURRENT_BINARY_DIR}/mbedtls" EXCLUDE_FROM_ALL)
 endfunction()
+
+function(huxerui_localnetwork_bundle_ios_tls target)
+    # The Xcode host combines HuxerUI library archives. Include the private TLS objects in the LocalNetwork archive.
+    find_program(LOCALNETWORK_LIBTOOL libtool REQUIRED)
+    set(tls_targets MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+    get_target_property(crypto_dependencies MbedTLS::mbedcrypto INTERFACE_LINK_LIBRARIES)
+    foreach (dependency IN LISTS crypto_dependencies)
+        if (TARGET "${dependency}")
+            get_target_property(kind "${dependency}" TYPE)
+            if (kind STREQUAL "STATIC_LIBRARY")
+                list(APPEND tls_targets "${dependency}")
+            endif ()
+        endif ()
+    endforeach ()
+    set(tls_archives)
+    foreach (dependency IN LISTS tls_targets)
+        list(APPEND tls_archives "$<TARGET_FILE:${dependency}>")
+    endforeach ()
+    # Static library link dependencies order the builds. A generated source also invalidates the merged archive.
+    set(rebuild_source "${CMAKE_CURRENT_BINARY_DIR}/localnetwork_ios_tls_dependencies.cpp")
+    add_custom_command(OUTPUT "${rebuild_source}"
+            COMMAND "${CMAKE_COMMAND}" -E touch "${rebuild_source}"
+            DEPENDS ${tls_targets}
+            VERBATIM
+    )
+    target_sources("${target}" PRIVATE "${rebuild_source}")
+    set(archive "$<TARGET_FILE:${target}>")
+    add_custom_command(TARGET "${target}" POST_BUILD
+            COMMAND "${LOCALNETWORK_LIBTOOL}" -static -o "${archive}.combined" "${archive}" ${tls_archives}
+            COMMAND "${CMAKE_COMMAND}" -E rename "${archive}.combined" "${archive}"
+            VERBATIM
+    )
+endfunction()

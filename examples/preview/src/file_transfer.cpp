@@ -169,8 +169,11 @@ Task<IoResult<void>> CreateSample(File file) {
   auto output = std::move(opened).Value();
 #ifdef __ANDROID__
   constexpr unsigned seed = 137;
-#else
+#elif defined(_WIN32)
   constexpr unsigned seed = 73;
+#else
+  // Distinct sample bytes expose direction mix-ups when testing against Windows.
+  constexpr unsigned seed = 191;
 #endif
   Bytes chunk(chunk_size);
   for (std::size_t index = 0; index < chunk.size(); ++index) {

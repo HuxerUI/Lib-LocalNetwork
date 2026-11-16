@@ -28,6 +28,11 @@ constexpr bool has_qr_camera = true;
 constexpr char service_name[] = "LocalNetwork Windows";
 constexpr bool has_qr_camera = false;
 #endif
+#ifdef HUXERUI_LOCALNETWORK_PREVIEW_QR
+constexpr bool has_pairing_qr = true;
+#else
+constexpr bool has_pairing_qr = false;
+#endif
 
 struct PreviewState {
   bool busy = false;
@@ -108,14 +113,18 @@ Task<NetworkResult<PairedConnection>> ListenForPeer(
     value.invitation = offer.Value().Code();
     value.invitation_qr = std::move(qr);
   });
-  auto published = co_await PublishServiceAsync({service_name, service_type, listener.LocalEndpoint()});
-  state.Update([&](PreviewState& value) {
-    value.publication_status = published.Succeeded() ? "Visible in the device list."
-                                                    : FormatError(published.Error());
-  });
+  std::optional<ServicePublication> publication;
+  if (IsDiscoverySupported()) {
+    auto published = co_await PublishServiceAsync({service_name, service_type, listener.LocalEndpoint()});
+    state.Update([&](PreviewState& value) {
+      value.publication_status = published.Succeeded() ? "Visible in the device list."
+                                                      : FormatError(published.Error());
+    });
+    if (published.Succeeded()) publication.emplace(std::move(published).Value());
+  }
   auto accepted = co_await listener.AcceptAsync();
   if (!accepted.Succeeded()) co_return Result::Failure(std::move(accepted).Error());
-  if (published.Succeeded()) published.Value().Close();
+  publication.reset();
   PairingPolicy policy;
   if (remembered) policy.trusted_peers.push_back(*remembered);
   policy.offer = std::move(offer).Value();
@@ -275,7 +284,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
       Button("Copy code").With(Enabled(clipboard != nullptr)).OnClick([=] {
         if (clipboard) (void)clipboard->WriteText(state->invitation);
       }),
-      Button("Save QR image").With(Enabled(state->invitation_qr.HasValue() && picker->CanSaveFiles())).OnClick([=] {
+      state->invitation_qr.HasValue() ? Button("Save QR image").With(Enabled(picker->CanSaveFiles())).OnClick([=] {
         const File file(directories.temporary_directory, "localnetwork-invitation-" + UniqueSuffix() + ".png");
         tasks.Launch([picker, image = state->invitation_qr, file]() -> Task<void> {
           TemporaryImage cleanup{file};
@@ -283,7 +292,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
             (void)co_await picker->SaveFileAsync(file, {.suggested_name = "LocalNetwork invitation.png"});
           }
         });
-      }),
+      }) : View{},
     }.With(Spacing(8.0F)).Key("invitation");
   }
 
@@ -370,7 +379,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
           FinishOperation(state, "Canceled.");
         }),
       }.With(Spacing(8.0F)),
-      Flow {
+      IsDiscoverySupported() || has_pairing_qr ? Flow {
         Button("Find devices").With(Enabled(IsDiscoverySupported() && !state->busy)).OnClick([=] {
           state.Update([](PreviewState& value) {
             value.busy = true;
@@ -389,7 +398,8 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
             FinishOperation(state, empty ? "No LocalNetwork devices found." : "Select a discovered device.");
           });
         }),
-        Button("Scan QR image").With(Enabled(supported && !state->busy && state->source && picker->CanOpenFiles()))
+        Button("Scan QR image").With(Enabled(has_pairing_qr && supported && !state->busy && state->source &&
+                                             picker->CanOpenFiles()))
             .OnClick([=] {
               auto selection = picker->OpenFileAsync({
                   .name = "QR image", .extensions = {"png", "jpg", "jpeg"},
@@ -417,7 +427,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
             else connect_scanned(co_await ReadInvitationQr(image.path));
           });
         }) : View{},
-      }.With(Spacing(8.0F)),
+      }.With(Spacing(8.0F)) : View{},
       Column(std::move(device_buttons)).With(Spacing(8.0F)),
       invitation_view,
       approval_view,

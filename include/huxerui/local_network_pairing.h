@@ -3,8 +3,8 @@
 /// @file
 /// @brief TLS 1.3 device identities, pairing invitations, and authenticated local connections.
 ///
-/// Include <huxerui/local_network_pairing.h> and link HuxerUI::LocalNetwork. Pairing is available on Windows and
-/// Android. Run the returned tasks in a HuxerUI TaskScope. Use ConnectPairedAsync() on the dialer and
+/// Include <huxerui/local_network_pairing.h> and link HuxerUI::LocalNetwork. Pairing is built for Windows, macOS,
+/// Linux, Android, and iOS. Run the returned tasks in a HuxerUI TaskScope. Use ConnectPairedAsync() on the dialer and
 /// AcceptPairedAsync() on a connection from TcpListener::AcceptAsync(). After both sides authenticate, use the
 /// returned streams for application data. The application owns private key storage, remembered peer identities,
 /// and the approval UI.
@@ -150,7 +150,7 @@ private:
 };
 
 /// @brief Reports whether paired TLS is implemented on the current platform.
-/// @return True on Windows and Android in this build. Connectivity and peer approval are checked when connecting.
+/// @return True when the library was built with the TLS backend. Connectivity and approval are checked when connecting.
 bool IsPairingSupported() noexcept;
 
 /// @brief Dials the endpoint and authenticates it with a remembered identity or pairing code.
