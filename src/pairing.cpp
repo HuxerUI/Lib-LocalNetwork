@@ -8,6 +8,9 @@
 
 #ifdef HUXERUI_LOCALNETWORK_TLS
 #include "socket_io.h"
+#ifdef HUXERUI_LOCALNETWORK_WSLAY
+#include "bridge_tls.h"
+#endif
 
 #include <cstdio>
 #include <stop_token>
@@ -288,7 +291,7 @@ public:
     mbedtls_ssl_config_free(&config_);
   }
 
-  int Configure(bool listener) {
+  int Configure(bool listener, bool browser = false) {
     std::scoped_lock lock(CryptoMutex());
     if (!socket_) return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
     auto result = mbedtls_ssl_config_defaults(&config_, listener ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
@@ -298,12 +301,13 @@ public:
     mbedtls_ssl_conf_max_tls_version(&config_, MBEDTLS_SSL_VERSION_TLS1_3);
     mbedtls_ssl_conf_tls13_key_exchange_modes(&config_, MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL);
     mbedtls_ssl_conf_rng(&config_, Random, nullptr);
-    // Request certificates on both ends. Device trust comes from the SPKI pin or approved invitation after TLS.
-    mbedtls_ssl_conf_authmode(&config_, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    // Paired TLS requests certificates on both ends. The WSS client instead presents an origin and one-time grant.
+    mbedtls_ssl_conf_authmode(&config_, browser ? MBEDTLS_SSL_VERIFY_NONE : MBEDTLS_SSL_VERIFY_OPTIONAL);
 #if defined(MBEDTLS_SSL_SESSION_TICKETS) && defined(MBEDTLS_SSL_CLI_C)
     mbedtls_ssl_conf_session_tickets(&config_, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
 #endif
-    result = mbedtls_ssl_conf_alpn_protocols(&config_, protocols);
+    static const char* browser_protocols[] = {"http/1.1", nullptr};
+    result = mbedtls_ssl_conf_alpn_protocols(&config_, browser ? browser_protocols : protocols);
     if (result != 0) return result;
     result = mbedtls_ssl_conf_own_cert(&config_, &identity_->certificate, &identity_->key);
     if (result != 0) return result;
@@ -500,6 +504,88 @@ Task<IoResult<void>> FinishTls(std::shared_ptr<TlsSocket> socket, std::stop_toke
 }
 
 } // namespace
+#ifdef HUXERUI_LOCALNETWORK_WSLAY
+namespace {
+
+class BridgeTlsSocket final : public SocketIo {
+public:
+  explicit BridgeTlsSocket(std::shared_ptr<TlsSocket> socket) : socket_(std::move(socket)) {}
+
+  IoResult<std::optional<std::size_t>> Receive(std::span<std::byte> bytes) override {
+    const auto count = socket_->Read({reinterpret_cast<unsigned char*>(bytes.data()), bytes.size()});
+    if (count >= 0 || count == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+      return IoResult<std::optional<std::size_t>>::Success(count > 0 ? static_cast<std::size_t>(count) : 0);
+    }
+    if (Retry(count)) return IoResult<std::optional<std::size_t>>::Success(std::nullopt);
+    return IoResult<std::optional<std::size_t>>::Failure({IoErrorCode::Io, "Could not read from WSS TLS."});
+  }
+
+  IoResult<std::size_t> Send(std::span<const std::byte> bytes) override {
+    const auto count = socket_->Write({reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()});
+    if (count >= 0 || Retry(count)) return IoResult<std::size_t>::Success(count > 0 ? count : 0);
+    return IoResult<std::size_t>::Failure({IoErrorCode::Io, "Could not write to WSS TLS."});
+  }
+
+  void Close() noexcept override { socket_->Close(); }
+
+private:
+  std::shared_ptr<TlsSocket> socket_;
+};
+
+NetworkResult<BridgeCredentials> LoadBridgeCredentials(std::string certificate_pem, std::string private_key_pem) {
+  const auto clear_key = [&] { mbedtls_platform_zeroize(private_key_pem.data(), private_key_pem.size()); };
+  const auto fail = [](int code) {
+    return NetworkResult<BridgeCredentials>::Failure(
+        CryptoError(NetworkErrorCode::Authentication, code, "Could not prepare the WSS certificate and grant."));
+  };
+  std::scoped_lock lock(CryptoMutex());
+  if (const auto error = InitializeCrypto(); error != 0) {
+    clear_key();
+    return fail(error);
+  }
+  auto identity = std::make_shared<IdentityState>();
+  // WSS uses a browser-trusted certificate chain supplied by the host application.
+  auto error = mbedtls_x509_crt_parse(&identity->certificate,
+      reinterpret_cast<const unsigned char*>(certificate_pem.c_str()), certificate_pem.size() + 1);
+  if (error == 0) {
+    error = mbedtls_pk_parse_key(&identity->key, reinterpret_cast<const unsigned char*>(private_key_pem.c_str()),
+        private_key_pem.size() + 1, nullptr, 0, Random, nullptr);
+  }
+  clear_key();
+  if (error == 0) error = mbedtls_pk_check_pair(&identity->certificate.pk, &identity->key, Random, nullptr);
+  if (error != 0) return fail(error);
+
+  std::array<std::uint8_t, 32> entropy{};
+  if (const auto random_error = Random(nullptr, entropy.data(), entropy.size()); random_error != 0) {
+    return fail(random_error);
+  }
+  auto grant = Hex(entropy);
+  mbedtls_platform_zeroize(entropy.data(), entropy.size());
+  return NetworkResult<BridgeCredentials>::Success({std::move(identity), std::move(grant)});
+}
+
+} // namespace
+
+Task<NetworkResult<BridgeCredentials>> PrepareBridgeCredentials(std::string certificate_pem, std::string private_key_pem) {
+  return RunWorker(LoadBridgeCredentials, std::move(certificate_pem), std::move(private_key_pem));
+}
+
+Task<NetworkResult<std::shared_ptr<SocketIo>>> AcceptBridgeTls(
+    std::shared_ptr<SocketIo> connection, std::shared_ptr<IdentityState> credentials, Clock::time_point deadline) {
+  auto socket = std::make_shared<TlsSocket>(std::move(connection), std::move(credentials));
+  if (const auto error = socket->Configure(true, true); error != 0) {
+    co_return NetworkResult<std::shared_ptr<SocketIo>>::Failure(
+        CryptoError(NetworkErrorCode::Authentication, error, "Could not configure WSS TLS."));
+  }
+  auto handshake = co_await RunControl([&] { return socket->Handshake(); }, deadline, NetworkErrorCode::Authentication);
+  if (!handshake.Succeeded()) co_return NetworkResult<std::shared_ptr<SocketIo>>::Failure(handshake.Error());
+  co_return NetworkResult<std::shared_ptr<SocketIo>>::Success(std::make_shared<BridgeTlsSocket>(std::move(socket)));
+}
+
+bool CheckBridgeGrant(std::string_view expected, std::string_view received) {
+  return expected.size() == received.size() && mbedtls_ct_memcmp(expected.data(), received.data(), expected.size()) == 0;
+}
+#endif
 #else
 class TlsSocket final {
 public:

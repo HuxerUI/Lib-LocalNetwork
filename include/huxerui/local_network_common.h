@@ -35,7 +35,7 @@ enum class NetworkErrorCode {
   ConnectionFailed, ///< The socket operation failed before establishing a connection.
   TimedOut,         ///< The operation did not complete by its deadline.
   Closed,           ///< The listener or connection has been closed.
-  Busy,             ///< The listener already has a pending accept.
+  Busy,             ///< The listener already has a pending accept or an active relay.
   InvalidIdentity,  ///< A device credential is invalid or could not be created.
   Authentication,   ///< TLS or peer authentication failed.
   PairingRejected,  ///< A pairing invitation or request was rejected.

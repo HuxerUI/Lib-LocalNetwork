@@ -116,6 +116,25 @@ The full design includes a user-enabled local native bridge. The browser uses WS
 - **Deployment.** For offline use, the bridge can serve the page over HTTPS and provide WSS on the same origin with a preconfigured trusted certificate and a hostname resolvable on the LAN. An external HTTPS origin can connect when browser policy, trust, and applicable local network permissions permit it. Offer the native client when those requirements cannot be met. [Chrome Local Network Access](https://developer.chrome.com/docs/modern-web-guidance/guides/security/local-network-access?hl=en)
 - **Authorization and identity.** Validate the browser `Origin` and have the local user approve the services, devices, and operations available to that page session. WSS authenticates the bridge. The bridge separately verifies the downstream peer, and the API identifies that verification as bridge-mediated. An application that requires browser-to-peer end-to-end encryption can add a WebRTC DataChannel with authenticated signaling. Both endpoints must bind the DTLS fingerprints to their verified invitation or device identities. [WebRTC specification](https://www.w3.org/TR/webrtc/)
 
+### Paired-session bridge
+
+The desktop application establishes an authenticated native session with `ConnectPairedAsync()` or
+`AcceptPairedAsync()`. After the user approves sharing that session, the application opens
+`ListenWebBridgeAsync()` with a browser-trusted PEM certificate chain, its private key, and the exact page origin.
+The listener binds to loopback by default. To use it from another device, choose a local interface address and use
+a hostname covered by the certificate. Deliver the WSS URL and `Grant()` to the approved page and pass the unused
+paired connection to `RelayAsync()`. Keep the listener and its task scope alive while forwarding.
+
+The Web build opens `ConnectWebBridgeAsync()` with that URL, the one-time grant, and optionally the expected
+downstream `PeerId`. Use `Input()` and `Output()` with the application's existing stream protocol, and await
+`Output().CloseAsync()` to end the sending direction. The WSS bridge uses a separate certificate from native
+pairing. It authenticates the native peer on the page's behalf and can inspect relayed bytes. The grant is sent
+inside WSS and consumed once. Keep it out of URLs, logs, and persistence.
+
+Windows, macOS, and Linux builds can host one paired session per listener. Set
+`HUXERUI_LOCALNETWORK_BUILD_WEB_BRIDGE=OFF` to omit the desktop listener. Browser-directed DNS-SD and dialing,
+service registration, and serving the Web application belong to the broader bridge design above.
+
 ## Physical device acceptance
 
 For each combination, record Wi-Fi association, discovery and resolution, direct connection and pairing, and file transfer separately. Run the discovery list, manual `IP:port`, and QR entry paths. Turn off browsing and clear cached discovery for the manual and QR runs. Use a fresh invitation for each. Verify Wi-Fi association and address configuration independently of internet access.
