@@ -1,4 +1,4 @@
-#ifdef HUXERUI_LOCALNETWORK_WIFI_SCAN
+#ifdef HUXERUI_LOCALNETWORK_GIO
 #include <gio/gio.h>
 
 #include "../../../src/wifi_backend.h"

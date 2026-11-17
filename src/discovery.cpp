@@ -1,5 +1,9 @@
 #include "discovery_backend.h"
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <algorithm>
 #include <string_view>
 #include <utility>
@@ -22,11 +26,14 @@ bool ValidName(std::string_view name) {
 
 NetworkError InvalidService() { return {NetworkErrorCode::InvalidEndpoint, 0, "Invalid DNS-SD service details."}; }
 
-#if defined(_WIN32) || defined(__ANDROID__) || defined(HUXERUI_LOCALNETWORK_AVAHI) || defined(HUXERUI_LOCALNETWORK_BONJOUR)
-#define HUXERUI_LOCALNETWORK_DISCOVERY_BACKEND
+#if defined(_WIN32) || defined(__ANDROID__) || defined(HUXERUI_LOCALNETWORK_AVAHI) || \
+    (defined(__APPLE__) && (TARGET_OS_OSX || TARGET_OS_IOS))
+constexpr bool discovery_supported = true;
 #else
-NetworkError Unsupported() { return {NetworkErrorCode::Unsupported, 0, "DNS-SD is unavailable on this platform."}; }
+constexpr bool discovery_supported = false;
 #endif
+
+NetworkError Unsupported() { return {NetworkErrorCode::Unsupported, 0, "DNS-SD is unavailable on this platform."}; }
 
 } // namespace
 
@@ -44,13 +51,7 @@ ServicePublication& ServicePublication::operator=(ServicePublication&& other) no
 ServicePublication::~ServicePublication() { Close(); }
 void ServicePublication::Close() noexcept { if (auto state = std::exchange(state_, {})) state->Close(); }
 
-bool IsDiscoverySupported() noexcept {
-#ifdef HUXERUI_LOCALNETWORK_DISCOVERY_BACKEND
-  return true;
-#else
-  return false;
-#endif
-}
+bool IsDiscoverySupported() noexcept { return discovery_supported; }
 
 Task<NetworkResult<std::vector<DiscoveredService>>> BrowseServicesAsync(
     std::string type, std::chrono::milliseconds observation) {
@@ -58,11 +59,11 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowseServicesAsync(
   if (!ValidType(type) || observation <= std::chrono::milliseconds::zero() || observation > std::chrono::seconds(10)) {
     co_return Result::Failure(InvalidService());
   }
-#ifdef HUXERUI_LOCALNETWORK_DISCOVERY_BACKEND
-  co_return co_await detail::BrowsePlatformServices(std::move(type), observation);
-#else
-  co_return Result::Failure(Unsupported());
-#endif
+  if constexpr (discovery_supported) {
+    co_return co_await detail::BrowsePlatformServices(std::move(type), observation);
+  } else {
+    co_return Result::Failure(Unsupported());
+  }
 }
 
 Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService service) {
@@ -70,11 +71,11 @@ Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService servi
   if (!ValidType(service.type) || service.instance.empty() || service.instance.find('\0') != std::string::npos) {
     co_return Result::Failure(InvalidService());
   }
-#ifdef HUXERUI_LOCALNETWORK_DISCOVERY_BACKEND
-  co_return co_await detail::ResolvePlatformService(std::move(service));
-#else
-  co_return Result::Failure(Unsupported());
-#endif
+  if constexpr (discovery_supported) {
+    co_return co_await detail::ResolvePlatformService(std::move(service));
+  } else {
+    co_return Result::Failure(Unsupported());
+  }
 }
 
 Task<NetworkResult<ServicePublication>> PublishServiceAsync(ServiceAnnouncement announcement) {
@@ -83,13 +84,13 @@ Task<NetworkResult<ServicePublication>> PublishServiceAsync(ServiceAnnouncement 
       announcement.endpoint.host.find('\0') != std::string::npos || announcement.endpoint.port == 0) {
     co_return Result::Failure(InvalidService());
   }
-#ifdef HUXERUI_LOCALNETWORK_DISCOVERY_BACKEND
-  auto published = co_await detail::PublishPlatformService(std::move(announcement));
-  if (!published.Succeeded()) co_return Result::Failure(std::move(published).Error());
-  co_return Result::Success(ServicePublication(std::move(published).Value()));
-#else
-  co_return Result::Failure(Unsupported());
-#endif
+  if constexpr (discovery_supported) {
+    auto published = co_await detail::PublishPlatformService(std::move(announcement));
+    if (!published.Succeeded()) co_return Result::Failure(std::move(published).Error());
+    co_return Result::Success(ServicePublication(std::move(published).Value()));
+  } else {
+    co_return Result::Failure(Unsupported());
+  }
 }
 
 } // namespace huxerui::localnetwork

@@ -1,5 +1,9 @@
 #include "wifi_backend.h"
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <algorithm>
 
 namespace huxerui::localnetwork::detail {
@@ -26,42 +30,48 @@ bool ValidWifiSsid(std::string_view ssid) {
 } // namespace huxerui::localnetwork::detail
 
 namespace huxerui::localnetwork {
+namespace {
+
+#if defined(_WIN32) || defined(__ANDROID__) || defined(HUXERUI_LOCALNETWORK_GIO) || \
+    (defined(__APPLE__) && TARGET_OS_OSX)
+constexpr bool wifi_scan_supported = true;
+#else
+constexpr bool wifi_scan_supported = false;
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+constexpr bool wifi_join_supported = true;
+#else
+constexpr bool wifi_join_supported = wifi_scan_supported;
+#endif
+
+} // namespace
 
 WifiNetworkLease::WifiNetworkLease(std::shared_ptr<detail::WifiNetworkState> state) : state_(std::move(state)) {}
 
 std::optional<std::uint64_t> WifiNetworkLease::AndroidNetwork() const noexcept { return state_->AndroidNetwork(); }
 
-bool IsWifiScanSupported() noexcept {
-#ifdef HUXERUI_LOCALNETWORK_WIFI_SCAN
-  return true;
-#else
-  return false;
-#endif
-}
+bool IsWifiScanSupported() noexcept { return wifi_scan_supported; }
 
-bool IsWifiJoinSupported() noexcept {
-#ifdef HUXERUI_LOCALNETWORK_WIFI_JOIN
-  return true;
-#else
-  return false;
-#endif
-}
+bool IsWifiJoinSupported() noexcept { return wifi_join_supported; }
 
 Task<NetworkResult<WifiScanResult>> ScanWifiAsync() {
   using Result = NetworkResult<WifiScanResult>;
-#ifdef HUXERUI_LOCALNETWORK_WIFI_SCAN
-  auto scan = co_await detail::ScanPlatformWifi();
-  if (!scan.Succeeded()) co_return scan;
-  auto& networks = scan.Value().networks;
-  std::erase_if(networks, [](const auto& network) { return !detail::ValidWifiSsid(network.ssid); });
-  const auto key = [](const auto& network) { return std::pair<std::string_view, WifiSecurity>{network.ssid, network.security}; };
-  std::ranges::sort(networks, {}, key);
-  const auto duplicates = std::ranges::unique(networks, {}, key);
-  networks.erase(duplicates.begin(), duplicates.end());
-  co_return scan;
-#else
-  co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Open system Wi-Fi settings to view available networks."});
-#endif
+  if constexpr (wifi_scan_supported) {
+    auto scan = co_await detail::ScanPlatformWifi();
+    if (!scan.Succeeded()) co_return scan;
+    auto& networks = scan.Value().networks;
+    std::erase_if(networks, [](const auto& network) { return !detail::ValidWifiSsid(network.ssid); });
+    const auto key = [](const auto& network) {
+      return std::pair<std::string_view, WifiSecurity>{network.ssid, network.security};
+    };
+    std::ranges::sort(networks, {}, key);
+    const auto duplicates = std::ranges::unique(networks, {}, key);
+    networks.erase(duplicates.begin(), duplicates.end());
+    co_return scan;
+  } else {
+    co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Open system Wi-Fi settings to view available networks."});
+  }
 }
 
 Task<NetworkResult<WifiJoinResult>> JoinWifiAsync(WifiJoinRequest request) {
@@ -79,11 +89,11 @@ Task<NetworkResult<WifiJoinResult>> JoinWifiAsync(WifiJoinRequest request) {
         !std::ranges::all_of(password, [](char value) { return value >= 0x20 && value <= 0x7E; })))) {
     co_return Result::Failure({NetworkErrorCode::InvalidWifiConfiguration, 0, "Enter a valid Wi-Fi passphrase."});
   }
-#ifdef HUXERUI_LOCALNETWORK_WIFI_JOIN
-  co_return co_await detail::JoinPlatformWifi(std::move(request));
-#else
-  co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Join the hotspot in system Wi-Fi settings."});
-#endif
+  if constexpr (wifi_join_supported) {
+    co_return co_await detail::JoinPlatformWifi(std::move(request));
+  } else {
+    co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Join the hotspot in system Wi-Fi settings."});
+  }
 }
 
 } // namespace huxerui::localnetwork
