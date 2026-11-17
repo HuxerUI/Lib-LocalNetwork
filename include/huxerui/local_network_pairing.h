@@ -160,7 +160,7 @@ bool IsPairingSupported() noexcept;
 /// @param endpoint Peer address and port obtained separately from the credential.
 /// @param identity Local device identity used for TLS client authentication.
 /// @param credential Expected peer identity and, for first-time pairing, the invitation secret.
-/// @param options TCP deadline and optional Android routing constraint. TLS has its own handshake deadline.
+/// @param options TCP deadline and optional Android network handle or Wi-Fi lease. TLS has its own handshake deadline.
 /// @return A lazy task yielding an authenticated connection or a NetworkError.
 Task<NetworkResult<PairedConnection>> ConnectPairedAsync(
     Endpoint endpoint, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options = {});

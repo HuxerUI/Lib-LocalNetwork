@@ -18,6 +18,8 @@
 
 namespace huxerui::localnetwork {
 
+class WifiNetworkLease;
+
 namespace detail {
 class TcpSocket;
 struct TcpConnectionAccess;
@@ -34,6 +36,9 @@ struct TcpDialOptions {
   /// maintains the network active until the connection closes. Leave this empty to use system routing.
   /// Supplying a nonzero handle outside Android returns Unsupported.
   std::optional<std::uint64_t> android_network;
+  /// Optional app-scoped Android Wi-Fi lease from JoinWifiAsync(). The connection retains it until close.
+  /// A lost lease fails the dial. Set either this field or android_network.
+  std::shared_ptr<const WifiNetworkLease> wifi_network;
 };
 
 /// @brief An owning TCP connection with independent input and output stream handles.
@@ -115,7 +120,7 @@ Task<NetworkResult<TcpListener>> ListenTcpAsync(Endpoint endpoint);
 ///
 /// Canceling the task skips result delivery. A system address lookup already in progress may finish in the background.
 /// @param endpoint Numeric address or hostname with a nonzero port. Supply an IPv6 scope when needed.
-/// @param options Connection deadline and optional Android route constraint.
+/// @param options Connection deadline and optional Android network handle or Wi-Fi lease.
 /// @return A lazy task yielding an owning connection or a NetworkError.
 Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOptions options = {});
 

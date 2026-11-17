@@ -16,6 +16,6 @@ HUXERUI_ENABLE_LTO = OFF
 HUXERUI_CORE_BUILD_DIR = $(DERIVED_FILE_DIR)/huxerui-core
 HUXERUI_LINK_OPTIONS_FILE = $(HUXERUI_CORE_BUILD_DIR)/huxerui-ios/example_local_network/link.rsp
 HEADER_SEARCH_PATHS = $(inherited) "$(HUXERUI_HOME)/include"
-OTHER_LDFLAGS = $(inherited) @"$(HUXERUI_LINK_OPTIONS_FILE)"
+OTHER_LDFLAGS = $(inherited) @"$(HUXERUI_LINK_OPTIONS_FILE)" -framework NetworkExtension
 
 #include? "Local.xcconfig"

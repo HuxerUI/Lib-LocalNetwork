@@ -42,6 +42,9 @@ enum class NetworkErrorCode {
   Protocol,         ///< The peer sent an invalid session message.
   System,           ///< An operation failed without a more specific category.
   DiscoveryFailed,  ///< The platform rejected a DNS-SD operation.
+  InvalidWifiConfiguration, ///< A Wi-Fi network name or credential is invalid.
+  WifiScanFailed,   ///< The system could not provide nearby Wi-Fi networks.
+  WifiJoinFailed,   ///< The system could not join the Wi-Fi network.
 };
 
 /// @brief An operational failure with a portable category and optional system diagnostic.
@@ -67,7 +70,7 @@ struct ConnectionPath {
 
 /// @brief Registers LocalNetwork's platform integration for an application.
 ///
-/// Add this function to the host's application hooks before running Android DNS-SD tasks.
+/// Add this function to the host's application hooks before running Android DNS-SD or Wi-Fi tasks.
 /// @param context Application context receiving the platform registrations.
 void Install(ApplicationContext& context);
 

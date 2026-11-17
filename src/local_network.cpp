@@ -18,6 +18,7 @@
 #include <huxerui/local_network_tcp.h>
 #include "socket_io.h"
 #include "discovery_backend.h"
+#include "wifi_backend.h"
 
 #include <algorithm>
 #include <atomic>
@@ -203,6 +204,8 @@ public:
     return Adopt(handle);
   }
 
+  void RetainWifiNetwork(std::shared_ptr<const WifiNetworkLease> network) { wifi_network_ = std::move(network); }
+
   NetworkResult<void> Listen(const addrinfo& address) {
     const int enabled = 1;
 #ifdef _WIN32
@@ -302,6 +305,9 @@ public:
     using Result = IoResult<std::optional<std::size_t>>;
     std::scoped_lock lock(mutex_);
     if (handle_ == invalid_socket) return Result::Failure({IoErrorCode::Io, "The TCP connection is closed."});
+    if (wifi_network_ && !wifi_network_->AndroidNetwork()) {
+      return Result::Failure({IoErrorCode::Io, "The selected Wi-Fi network was lost."});
+    }
     const auto count = recv(handle_, reinterpret_cast<char*>(bytes.data()), static_cast<int>(bytes.size()), 0);
     if (count >= 0) return Result::Success(static_cast<std::size_t>(count));
     const int error = SocketError();
@@ -313,6 +319,9 @@ public:
     std::scoped_lock lock(mutex_);
     if (handle_ == invalid_socket) {
       return IoResult<std::size_t>::Failure({IoErrorCode::Io, "The TCP connection is closed."});
+    }
+    if (wifi_network_ && !wifi_network_->AndroidNetwork()) {
+      return IoResult<std::size_t>::Failure({IoErrorCode::Io, "The selected Wi-Fi network was lost."});
     }
     const auto count = send(handle_, reinterpret_cast<const char*>(bytes.data()),
                             static_cast<int>(bytes.size()), send_flags);
@@ -330,8 +339,12 @@ public:
   }
 
   void Close() noexcept override {
-    std::scoped_lock lock(mutex_);
-    if (handle_ != invalid_socket) CloseSocket(std::exchange(handle_, invalid_socket));
+    std::shared_ptr<const WifiNetworkLease> network;
+    {
+      std::scoped_lock lock(mutex_);
+      if (handle_ != invalid_socket) CloseSocket(std::exchange(handle_, invalid_socket));
+      network = std::move(wifi_network_);
+    }
   }
 
   std::atomic_bool accepting{false};
@@ -363,6 +376,7 @@ private:
   // Serialize handle access with Close so a cancelled operation cannot touch a reused descriptor.
   std::mutex mutex_;
   SocketHandle handle_;
+  std::shared_ptr<const WifiNetworkLease> wifi_network_;
 #endif
 };
 
@@ -530,15 +544,24 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
   co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Direct TCP is unavailable on this platform."});
 #else
   if (!detail::ValidHost(endpoint.host) || endpoint.port == 0 ||
-      options.timeout <= std::chrono::milliseconds::zero() || options.android_network == 0) {
+      options.timeout <= std::chrono::milliseconds::zero() || options.android_network == 0 ||
+      (options.android_network && options.wifi_network)) {
     co_return Result::Failure(
         {NetworkErrorCode::InvalidEndpoint, 0, "A host, nonzero port, and valid dial options are required."});
   }
+  const NetworkError network_lost{NetworkErrorCode::NetworkLost, 0, "The selected Wi-Fi network was lost."};
+  auto network = options.android_network;
+  if (options.wifi_network) {
+    network = options.wifi_network->AndroidNetwork();
+    if (!network) co_return Result::Failure(network_lost);
+  }
+  const auto lost = [&] { return options.wifi_network && !options.wifi_network->AndroidNetwork(); };
   const auto now = detail::Clock::now();
   const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(detail::Clock::time_point::max() - now);
   const auto deadline = options.timeout >= remaining ? detail::Clock::time_point::max() : now + options.timeout;
-  auto resolved = co_await RunWorker(detail::Resolve, std::move(endpoint), options.android_network, false);
+  auto resolved = co_await RunWorker(detail::Resolve, std::move(endpoint), network, false);
   const NetworkError timeout{NetworkErrorCode::TimedOut, 0, "The TCP connection timed out."};
+  if (lost()) co_return Result::Failure(network_lost);
   if (detail::Clock::now() >= deadline) co_return Result::Failure(timeout);
   if (!resolved.Succeeded()) co_return Result::Failure(std::move(resolved).Error());
 
@@ -551,10 +574,11 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
       continue;
     }
     auto socket = std::move(opened).Value();
-    auto connected = socket->Connect(*address, options.android_network);
+    auto connected = socket->Connect(*address, network);
     while (connected.Succeeded() && !connected.Value()) {
       if (detail::Clock::now() >= deadline) co_return Result::Failure(timeout);
       co_await Delay(detail::retry_interval);
+      if (lost()) co_return Result::Failure(network_lost);
       connected = socket->CheckConnect();
     }
     if (!connected.Succeeded()) {
@@ -565,6 +589,8 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
     if (detail::Clock::now() >= deadline) co_return Result::Failure(timeout);
     auto path = socket->Path();
     if (!path.Succeeded()) co_return Result::Failure(std::move(path).Error());
+    if (lost()) co_return Result::Failure(network_lost);
+    socket->RetainWifiNetwork(options.wifi_network);
     co_return Result::Success(TcpConnection(std::move(socket), std::move(path).Value()));
   }
   co_return Result::Failure(std::move(failure));
@@ -572,7 +598,10 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
 }
 
 #ifdef __ANDROID__
-void Install(ApplicationContext& context) { detail::InstallPlatformDiscovery(context); }
+void Install(ApplicationContext& context) {
+  detail::InstallPlatformDiscovery(context);
+  detail::InstallPlatformWifi(context);
+}
 #else
 void Install(ApplicationContext&) {}
 #endif
