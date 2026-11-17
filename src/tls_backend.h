@@ -7,6 +7,9 @@
 
 namespace huxerui::localnetwork::detail {
 
+struct IdentityState;
+class SocketIo;
+
 struct TlsServerName {
   std::string host;
   std::array<unsigned char, 16> address{};
@@ -14,6 +17,10 @@ struct TlsServerName {
 };
 
 Task<NetworkResult<std::shared_ptr<TlsSocket>>> ConnectSystemTls(TcpConnection connection, TlsServerName server);
+Task<NetworkResult<std::shared_ptr<IdentityState>>> PrepareTlsServerCredentials(
+    std::string certificate_pem, std::string private_key_pem);
+Task<NetworkResult<std::shared_ptr<TlsSocket>>> AcceptServerTls(
+    std::shared_ptr<SocketIo> connection, std::shared_ptr<IdentityState> credentials);
 
 /// After the TLS layer checks the leaf SAN, verify the certificate chain using platform trust.
 Task<NetworkResult<void>> VerifyPlatformTlsChain(std::vector<Bytes> certificates, std::string server_name);

@@ -39,6 +39,7 @@ enum class ConnectionSecurity {
   PlainTcp,    ///< Unencrypted TCP.
   PlatformTls, ///< TLS authenticated against platform trust and a server name.
   PairedTls,   ///< TLS authenticated against a HuxerUI device identity.
+  ServerTls,   ///< TLS accepted by a listener that presents a server certificate without authenticating the client.
 };
 
 /// @brief Security details reported by an established connection.
@@ -57,7 +58,7 @@ class Connection final {
 public:
   /// Takes ownership of a plain TCP connection.
   explicit Connection(TcpConnection connection);
-  /// Takes ownership of a platform-trusted TLS connection.
+  /// Takes ownership of a dialed or accepted direct TLS connection.
   explicit Connection(TlsConnection connection);
   /// Takes ownership of a paired TLS connection.
   explicit Connection(PairedConnection connection);
@@ -77,7 +78,8 @@ public:
   const ConnectionPath& Path() const noexcept;
   /// Returns the connection's security mode and paired peer identifier, when available.
   SecurityInfo Security() const noexcept;
-  /// Finishes the output stream and signals end of output to the peer while leaving input available.
+  /// Finishes the output stream and signals end of output to the peer. Complete the application exchange first
+  /// when using TLS 1.2, whose closure alert ends the session.
   Task<IoResult<void>> ShutdownWriteAsync();
   /// Returns a lazy task that closes both directions. Keep the connection in place until the task completes.
   Task<NetworkResult<void>> CloseAsync();

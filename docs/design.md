@@ -112,6 +112,21 @@ distribution's CA bundle, and Android uses the application's default Android tru
 register `Install()` and pass any required Wi-Fi lease through `TlsDialOptions::tcp`. DNS lookup, TCP, and TLS
 traffic then use that lease. [TLS client API](../include/huxerui/local_network_tls.h)
 
+### Direct TLS listener
+
+`ListenTlsAsync()` binds a numeric address and negotiates TLS 1.2 or TLS 1.3 before returning each connection
+from `AcceptAsync()`. The application supplies a PEM leaf certificate, its intermediate certificates in issuer
+order, and an unencrypted matching PEM private key. The library checks the key against the leaf when opening
+the listener. The dialing application establishes trust in the server certificate through its own trust policy.
+
+An accepted connection presents the server certificate without authenticating the client. Applications authorize
+requests on the resulting byte streams. `Connection::Security()` reports `ServerTls` when wrapping an accepted
+connection. Closing the listener ends a pending accept, including a TLS handshake in progress. Established
+connections stay open. TLS 1.3 supports independent output shutdown. For TLS 1.2, finish the application
+exchange before sending `close_notify`, which initiates closure of the entire session. Web builds return
+`Unsupported` for direct TLS listeners. [TLS listener API](../include/huxerui/local_network_tls.h) ·
+[TLS closure alerts](https://www.rfc-editor.org/rfc/rfc8446.html#section-6.1)
+
 ## Known Wi-Fi networks and Android routing
 
 `WifiJoinRequest` carries the exact SSID, security mode, credentials or an existing system profile reference, and the requested temporary or persistent mode. Use an existing OS profile for enterprise Wi-Fi. Pass credentials to the OS and omit them from logs and diagnostics. Joining can change the device's current Wi-Fi network. Release temporary configurations that the library owns. For user-managed networks, release only the borrowed route handle.

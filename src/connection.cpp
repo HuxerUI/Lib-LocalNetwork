@@ -100,7 +100,8 @@ const ConnectionPath& Connection::Path() const noexcept {
 SecurityInfo Connection::Security() const noexcept {
   if (const auto* paired = std::get_if<PairedConnection>(&transport_))
     return {ConnectionSecurity::PairedTls, paired->Peer()};
-  if (std::holds_alternative<TlsConnection>(transport_)) return {ConnectionSecurity::PlatformTls, {}};
+  if (const auto* tls = std::get_if<TlsConnection>(&transport_))
+    return {tls->IsPeerAuthenticated() ? ConnectionSecurity::PlatformTls : ConnectionSecurity::ServerTls, {}};
   return {ConnectionSecurity::PlainTcp, {}};
 }
 

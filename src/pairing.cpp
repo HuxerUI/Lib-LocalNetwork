@@ -344,23 +344,27 @@ public:
     return Setup();
   }
 
-  int ConfigureAccessory(const TlsServerName& server) {
+  int ConfigureAccessoryClient(const TlsServerName& server) {
     std::scoped_lock lock(CryptoMutex());
-    if (!socket_) return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
-    auto result = InitializeCrypto();
+    auto result = ConfigureAccessory(MBEDTLS_SSL_IS_CLIENT);
     if (result != 0) return result;
-    result = mbedtls_ssl_config_defaults(&config_, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
-                                         MBEDTLS_SSL_PRESET_DEFAULT);
-    if (result != 0) return result;
-    mbedtls_ssl_conf_min_tls_version(&config_, MBEDTLS_SSL_VERSION_TLS1_2);
-    mbedtls_ssl_conf_tls13_key_exchange_modes(&config_, MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL);
-    mbedtls_ssl_conf_rng(&config_, Random, nullptr);
     // Keep the server chain for platform trust evaluation. The dial exposes streams only after it succeeds.
     mbedtls_ssl_conf_authmode(&config_, MBEDTLS_SSL_VERIFY_OPTIONAL);
     result = Setup();
     if (result != 0) return result;
     // SNI carries DNS names. The separate SAN check compares IP addresses as binary values.
     return mbedtls_ssl_set_hostname(&tls_, server.address_size == 0 ? server.host.c_str() : nullptr);
+  }
+
+  int ConfigureAccessoryServer() {
+    std::scoped_lock lock(CryptoMutex());
+    if (!identity_) return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    auto result = ConfigureAccessory(MBEDTLS_SSL_IS_SERVER);
+    if (result != 0) return result;
+    // Clients validate the server certificate. Request authorization belongs to the server application.
+    mbedtls_ssl_conf_authmode(&config_, MBEDTLS_SSL_VERIFY_NONE);
+    result = mbedtls_ssl_conf_own_cert(&config_, &identity_->certificate, &identity_->key);
+    return result == 0 ? Setup() : result;
   }
 
   NetworkResult<std::vector<Bytes>> AccessoryChain(const TlsServerName& server) {
@@ -433,6 +437,18 @@ public:
   }
 
 private:
+  int ConfigureAccessory(int endpoint) {
+    if (!socket_) return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    auto result = InitializeCrypto();
+    if (result != 0) return result;
+    result = mbedtls_ssl_config_defaults(&config_, endpoint, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    if (result != 0) return result;
+    mbedtls_ssl_conf_min_tls_version(&config_, MBEDTLS_SSL_VERSION_TLS1_2);
+    mbedtls_ssl_conf_tls13_key_exchange_modes(&config_, MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL);
+    mbedtls_ssl_conf_rng(&config_, Random, nullptr);
+    return 0;
+  }
+
   int Setup() {
     const auto result = mbedtls_ssl_setup(&tls_, &config_);
     if (result == 0) mbedtls_ssl_set_bio(&tls_, this, SendEncrypted, ReceiveEncrypted, nullptr);
@@ -585,6 +601,38 @@ Task<IoResult<void>> FinishTls(std::shared_ptr<TlsSocket> socket, std::stop_toke
   }
 }
 
+// Own the PEM in the worker operation so cancellation before parsing also clears it.
+struct TlsPrivateKey {
+  std::string pem;
+
+  explicit TlsPrivateKey(std::string&& value) noexcept : pem(std::move(value)) {}
+  TlsPrivateKey(TlsPrivateKey&&) noexcept = default;
+  ~TlsPrivateKey() { mbedtls_platform_zeroize(pem.data(), pem.size()); }
+};
+
+NetworkResult<std::shared_ptr<IdentityState>> LoadTlsServerCredentials(
+    std::string certificate_pem, TlsPrivateKey private_key) {
+  using Result = NetworkResult<std::shared_ptr<IdentityState>>;
+  const auto fail = [](int code) {
+    return Result::Failure(CryptoError(NetworkErrorCode::Authentication, code,
+        "Could not load the TLS server certificate chain and private key."));
+  };
+  std::scoped_lock lock(CryptoMutex());
+  auto error = InitializeCrypto();
+  if (error != 0) return fail(error);
+  auto identity = std::make_shared<IdentityState>();
+  // Mbed TLS retains the chain in input order and uses the first certificate as the server identity.
+  error = mbedtls_x509_crt_parse(&identity->certificate, reinterpret_cast<const unsigned char*>(certificate_pem.c_str()),
+                                certificate_pem.size() + 1);
+  if (error == 0) {
+    error = mbedtls_pk_parse_key(&identity->key, reinterpret_cast<const unsigned char*>(private_key.pem.c_str()),
+                                private_key.pem.size() + 1, nullptr, 0, Random, nullptr);
+  }
+  if (error == 0) error = mbedtls_pk_check_pair(&identity->certificate.pk, &identity->key, Random, nullptr);
+  if (error != 0) return fail(error);
+  return Result::Success(std::move(identity));
+}
+
 } // namespace
 
 AsyncInputStream MakeTlsInput(const std::shared_ptr<TlsSocket>& socket) {
@@ -602,7 +650,7 @@ AsyncOutputStream MakeTlsOutput(const std::shared_ptr<TlsSocket>& socket) {
 Task<NetworkResult<std::shared_ptr<TlsSocket>>> ConnectSystemTls(TcpConnection connection, TlsServerName server) {
   using Result = NetworkResult<std::shared_ptr<TlsSocket>>;
   auto socket = std::make_shared<TlsSocket>(TcpConnectionAccess::TakeSocket(connection), nullptr);
-  if (const auto error = socket->ConfigureAccessory(server); error != 0) {
+  if (const auto error = socket->ConfigureAccessoryClient(server); error != 0) {
     co_return Result::Failure(CryptoError(NetworkErrorCode::System, error, "Could not configure the TLS client."));
   }
   auto handshake = co_await RunControl([&] { return socket->Handshake(); }, Clock::now() + handshake_timeout,
@@ -612,6 +660,24 @@ Task<NetworkResult<std::shared_ptr<TlsSocket>>> ConnectSystemTls(TcpConnection c
   if (!certificates.Succeeded()) co_return Result::Failure(certificates.Error());
   auto verified = co_await VerifyPlatformTlsChain(std::move(certificates).Value(), std::move(server.host));
   if (!verified.Succeeded()) co_return Result::Failure(verified.Error());
+  co_return Result::Success(std::move(socket));
+}
+
+Task<NetworkResult<std::shared_ptr<IdentityState>>> PrepareTlsServerCredentials(
+    std::string certificate_pem, std::string private_key_pem) {
+  return RunWorker(LoadTlsServerCredentials, std::move(certificate_pem), TlsPrivateKey(std::move(private_key_pem)));
+}
+
+Task<NetworkResult<std::shared_ptr<TlsSocket>>> AcceptServerTls(
+    std::shared_ptr<SocketIo> connection, std::shared_ptr<IdentityState> credentials) {
+  using Result = NetworkResult<std::shared_ptr<TlsSocket>>;
+  auto socket = std::make_shared<TlsSocket>(std::move(connection), std::move(credentials));
+  if (const auto error = socket->ConfigureAccessoryServer(); error != 0) {
+    co_return Result::Failure(CryptoError(NetworkErrorCode::System, error, "Could not configure the TLS server."));
+  }
+  auto handshake = co_await RunControl([&] { return socket->Handshake(); }, Clock::now() + handshake_timeout,
+                                      NetworkErrorCode::Authentication);
+  if (!handshake.Succeeded()) co_return Result::Failure(handshake.Error());
   co_return Result::Success(std::move(socket));
 }
 
@@ -679,38 +745,18 @@ NetworkResult<std::string> MakeBridgeGrant() {
   return NetworkResult<std::string>::Success(std::move(grant));
 }
 
-NetworkResult<BridgeCredentials> LoadBridgeCredentials(std::string certificate_pem, std::string private_key_pem) {
-  const auto clear_key = [&] { mbedtls_platform_zeroize(private_key_pem.data(), private_key_pem.size()); };
-  const auto fail = [](int code) {
-    return NetworkResult<BridgeCredentials>::Failure(
-        CryptoError(NetworkErrorCode::Authentication, code, "Could not prepare the WSS certificate and grant."));
-  };
-  std::scoped_lock lock(CryptoMutex());
-  if (const auto error = InitializeCrypto(); error != 0) {
-    clear_key();
-    return fail(error);
-  }
-  auto identity = std::make_shared<IdentityState>();
-  // WSS uses a browser-trusted certificate chain supplied by the host application.
-  auto error = mbedtls_x509_crt_parse(&identity->certificate,
-      reinterpret_cast<const unsigned char*>(certificate_pem.c_str()), certificate_pem.size() + 1);
-  if (error == 0) {
-    error = mbedtls_pk_parse_key(&identity->key, reinterpret_cast<const unsigned char*>(private_key_pem.c_str()),
-        private_key_pem.size() + 1, nullptr, 0, Random, nullptr);
-  }
-  clear_key();
-  if (error == 0) error = mbedtls_pk_check_pair(&identity->certificate.pk, &identity->key, Random, nullptr);
-  if (error != 0) return fail(error);
-
-  auto grant = MakeBridgeGrant();
+NetworkResult<BridgeCredentials> LoadBridgeCredentials(std::string certificate_pem, TlsPrivateKey private_key) {
+  auto identity = LoadTlsServerCredentials(std::move(certificate_pem), std::move(private_key));
+  if (!identity.Succeeded()) return NetworkResult<BridgeCredentials>::Failure(identity.Error());
+  auto grant = GenerateBridgeGrant();
   if (!grant.Succeeded()) return NetworkResult<BridgeCredentials>::Failure(grant.Error());
-  return NetworkResult<BridgeCredentials>::Success({std::move(identity), std::move(grant).Value()});
+  return NetworkResult<BridgeCredentials>::Success({std::move(identity).Value(), std::move(grant).Value()});
 }
 
 } // namespace
 
 Task<NetworkResult<BridgeCredentials>> PrepareBridgeCredentials(std::string certificate_pem, std::string private_key_pem) {
-  return RunWorker(LoadBridgeCredentials, std::move(certificate_pem), std::move(private_key_pem));
+  return RunWorker(LoadBridgeCredentials, std::move(certificate_pem), TlsPrivateKey(std::move(private_key_pem)));
 }
 
 NetworkResult<std::string> GenerateBridgeGrant() {
