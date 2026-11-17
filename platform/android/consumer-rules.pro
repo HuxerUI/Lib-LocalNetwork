@@ -1,2 +1,3 @@
 -keep class org.huxerui.lib.localnetwork.DiscoveryModule { public <init>(); }
 -keep class org.huxerui.lib.localnetwork.WifiModule { public <init>(); }
+-keep class org.huxerui.lib.localnetwork.TlsTrustModule { public <init>(); }

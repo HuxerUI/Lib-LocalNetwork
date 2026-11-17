@@ -81,6 +81,21 @@ Adapt platform I/O through HuxerUI's `AsyncInputStream::FromReader` and `AsyncOu
 
 The installed HuxerUI SDK 0.4.0 headers lack the public callback-backed stream factories. Implementation requires a matching SDK that exposes both factories. Lib-PluginKit already uses that contract. [HuxerUI stream API](https://github.com/HuxerUI/HuxerUI/blob/main/include/huxerui/stream.h) · [Lib-PluginKit stream adapter](https://github.com/HuxerUI/Lib-PluginKit/blob/main/include/huxerui/pluginkit/detail/streams.h)
 
+### Accessory TLS client
+
+Use `DialTlsAsync()` for a TLS 1.2 or TLS 1.3 accessory that uses platform trust. The connection exposes the
+same input and output streams as the paired transport. The dial checks a DNS or IP subject alternative name
+before exposing application bytes. When a numeric address locates an accessory with a DNS certificate, set
+`TlsDialOptions::server_name` to the expected DNS name. [TLS service identity](https://www.rfc-editor.org/rfc/rfc9525.html)
+
+The TLS engine must parse the certificate chain before platform trust evaluation. An unsupported critical
+extension, such as name constraints in the current Mbed TLS backend, fails the handshake.
+
+Windows uses the system certificate chain engine, macOS and iOS use Security framework trust, Linux uses the
+distribution's CA bundle, and Android uses the application's default Android trust manager. On Android,
+register `Install()` and pass any required Wi-Fi lease through `TlsDialOptions::tcp`. DNS lookup, TCP, and TLS
+traffic then use that lease. [TLS client API](../include/huxerui/local_network_tls.h)
+
 ## Known Wi-Fi networks and Android routing
 
 `WifiJoinRequest` carries the exact SSID, security mode, credentials or an existing system profile reference, and the requested temporary or persistent mode. Use an existing OS profile for enterprise Wi-Fi. Pass credentials to the OS and omit them from logs and diagnostics. Joining can change the device's current Wi-Fi network. Release temporary configurations that the library owns. For user-managed networks, release only the borrowed route handle.

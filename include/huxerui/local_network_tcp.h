@@ -6,7 +6,8 @@
 /// Include <huxerui/local_network_tcp.h> and link HuxerUI::LocalNetwork. Run the returned tasks in a HuxerUI TaskScope.
 /// ListenTcpAsync() creates a listener, TcpListener::AcceptAsync() accepts an incoming connection,
 /// and DialTcpAsync() opens an outgoing connection. Both directions expose the SDK's asynchronous byte streams over plain TCP.
-/// @see local_network_discovery.h for DNS-SD and local_network_pairing.h for authenticated TLS sessions.
+/// @see local_network_discovery.h for DNS-SD, local_network_tls.h for accessory TLS clients, and
+/// local_network_pairing.h for paired TLS sessions.
 
 #include <chrono>
 #include <cstdint>

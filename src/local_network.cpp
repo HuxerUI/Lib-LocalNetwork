@@ -19,6 +19,9 @@
 #include "socket_io.h"
 #include "discovery_backend.h"
 #include "wifi_backend.h"
+#ifdef __ANDROID__
+#include "tls_backend.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -613,6 +616,7 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
 void Install(ApplicationContext& context) {
   detail::InstallPlatformDiscovery(context);
   detail::InstallPlatformWifi(context);
+  detail::InstallPlatformTlsTrust(context);
 }
 #else
 void Install(ApplicationContext&) {}

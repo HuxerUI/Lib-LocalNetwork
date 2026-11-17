@@ -1,5 +1,7 @@
 #include <huxerui/local_network_pairing.h>
 
+#include "tls_backend.h"
+
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -274,6 +276,34 @@ NetworkResult<Bytes> ExportIdentity(const std::shared_ptr<IdentityState>& identi
 
 bool Retry(int result) { return result == MBEDTLS_ERR_SSL_WANT_READ || result == MBEDTLS_ERR_SSL_WANT_WRITE; }
 
+char LowerAscii(char value) {
+  return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
+}
+
+bool MatchesServerName(const mbedtls_x509_crt& certificate, const TlsServerName& server) {
+  for (auto* name = &certificate.subject_alt_names; name && name->buf.p; name = name->next) {
+    const auto& value = name->buf;
+    if (server.address_size != 0) {
+      if (value.tag == (MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_X509_SAN_IP_ADDRESS) &&
+          value.len == server.address_size && std::ranges::equal(std::span(value.p, value.len),
+              std::span(server.address).first(server.address_size))) return true;
+      continue;
+    }
+    if (value.tag != (MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_X509_SAN_DNS_NAME)) continue;
+    std::string_view presented(reinterpret_cast<const char*>(value.p), value.len);
+    std::string_view reference = server.host;
+    // A wildcard can replace one complete DNS label. The suffix still has to match exactly.
+    if (presented.starts_with("*.")) {
+      const auto first_dot = reference.find('.');
+      if (first_dot == std::string_view::npos) continue;
+      reference.remove_prefix(first_dot + 1);
+      presented.remove_prefix(2);
+    }
+    if (std::ranges::equal(presented, reference, {}, LowerAscii, LowerAscii)) return true;
+  }
+  return false;
+}
+
 } // namespace
 
 class TlsSocket final {
@@ -311,9 +341,55 @@ public:
     if (result != 0) return result;
     result = mbedtls_ssl_conf_own_cert(&config_, &identity_->certificate, &identity_->key);
     if (result != 0) return result;
-    result = mbedtls_ssl_setup(&tls_, &config_);
-    if (result == 0) mbedtls_ssl_set_bio(&tls_, this, SendEncrypted, ReceiveEncrypted, nullptr);
-    return result;
+    return Setup();
+  }
+
+  int ConfigureAccessory(const TlsServerName& server) {
+    std::scoped_lock lock(CryptoMutex());
+    if (!socket_) return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    auto result = InitializeCrypto();
+    if (result != 0) return result;
+    result = mbedtls_ssl_config_defaults(&config_, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+                                         MBEDTLS_SSL_PRESET_DEFAULT);
+    if (result != 0) return result;
+    mbedtls_ssl_conf_min_tls_version(&config_, MBEDTLS_SSL_VERSION_TLS1_2);
+    mbedtls_ssl_conf_tls13_key_exchange_modes(&config_, MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL);
+    mbedtls_ssl_conf_rng(&config_, Random, nullptr);
+    // Keep the server chain for platform trust evaluation. The dial exposes streams only after it succeeds.
+    mbedtls_ssl_conf_authmode(&config_, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    result = Setup();
+    if (result != 0) return result;
+    // SNI carries DNS names. The separate SAN check compares IP addresses as binary values.
+    return mbedtls_ssl_set_hostname(&tls_, server.address_size == 0 ? server.host.c_str() : nullptr);
+  }
+
+  NetworkResult<std::vector<Bytes>> AccessoryChain(const TlsServerName& server) {
+    using Result = NetworkResult<std::vector<Bytes>>;
+    std::scoped_lock lock(CryptoMutex());
+    const auto* certificate = mbedtls_ssl_get_peer_cert(&tls_);
+    if (!certificate || !certificate->raw.p)
+      return Result::Failure({NetworkErrorCode::Authentication, 0, "The TLS server did not provide a certificate."});
+    if (!MatchesServerName(*certificate, server)) {
+      return Result::Failure({NetworkErrorCode::Authentication, 0, "The TLS certificate does not match the server name."});
+    }
+    const auto flags = mbedtls_ssl_get_verify_result(&tls_);
+    // Platform verification decides trust. Preserve the TLS engine's other certificate checks, including key usage.
+    if ((flags & ~static_cast<std::uint32_t>(MBEDTLS_X509_BADCERT_NOT_TRUSTED)) != 0) {
+      return Result::Failure(CryptoError(NetworkErrorCode::Authentication, static_cast<int>(flags),
+                                         "The TLS server certificate is invalid."));
+    }
+    constexpr std::size_t max_chain_bytes = 256 * 1024;
+    constexpr std::size_t max_certificates = 16;
+    std::size_t bytes = 0;
+    std::vector<Bytes> chain;
+    for (auto* item = certificate; item && item->raw.p; item = item->next) {
+      if (chain.size() == max_certificates || item->raw.len > max_chain_bytes - bytes)
+        return Result::Failure({NetworkErrorCode::Authentication, 0, "The TLS certificate chain exceeds its limits."});
+      const auto der = std::as_bytes(std::span(item->raw.p, item->raw.len));
+      chain.emplace_back(der.begin(), der.end());
+      bytes += der.size();
+    }
+    return Result::Success(std::move(chain));
   }
 
   NetworkResult<PeerId> Peer() {
@@ -357,6 +433,12 @@ public:
   }
 
 private:
+  int Setup() {
+    const auto result = mbedtls_ssl_setup(&tls_, &config_);
+    if (result == 0) mbedtls_ssl_set_bio(&tls_, this, SendEncrypted, ReceiveEncrypted, nullptr);
+    return result;
+  }
+
   static int SendEncrypted(void* context, const unsigned char* data, std::size_t size) {
     auto& self = *static_cast<TlsSocket*>(context);
     auto sent = self.socket_->Send(std::as_bytes(std::span(data, size)));
@@ -504,6 +586,60 @@ Task<IoResult<void>> FinishTls(std::shared_ptr<TlsSocket> socket, std::stop_toke
 }
 
 } // namespace
+
+AsyncInputStream MakeTlsInput(const std::shared_ptr<TlsSocket>& socket) {
+  return AsyncInputStream::FromReader([socket](std::stop_token stop, std::size_t maximum) {
+    return ReadTls(socket, stop, maximum);
+  });
+}
+
+AsyncOutputStream MakeTlsOutput(const std::shared_ptr<TlsSocket>& socket) {
+  return AsyncOutputStream::FromWriter(
+      [socket](std::stop_token stop, Bytes bytes) { return WriteTls(socket, stop, std::move(bytes)); },
+      [socket](std::stop_token stop) { return FinishTls(socket, stop); });
+}
+
+Task<NetworkResult<std::shared_ptr<TlsSocket>>> ConnectSystemTls(TcpConnection connection, TlsServerName server) {
+  using Result = NetworkResult<std::shared_ptr<TlsSocket>>;
+  auto socket = std::make_shared<TlsSocket>(TcpConnectionAccess::TakeSocket(connection), nullptr);
+  if (const auto error = socket->ConfigureAccessory(server); error != 0) {
+    co_return Result::Failure(CryptoError(NetworkErrorCode::System, error, "Could not configure the TLS client."));
+  }
+  auto handshake = co_await RunControl([&] { return socket->Handshake(); }, Clock::now() + handshake_timeout,
+                                      NetworkErrorCode::Authentication);
+  if (!handshake.Succeeded()) co_return Result::Failure(handshake.Error());
+  auto certificates = socket->AccessoryChain(server);
+  if (!certificates.Succeeded()) co_return Result::Failure(certificates.Error());
+  auto verified = co_await VerifyPlatformTlsChain(std::move(certificates).Value(), std::move(server.host));
+  if (!verified.Succeeded()) co_return Result::Failure(verified.Error());
+  co_return Result::Success(std::move(socket));
+}
+
+NetworkResult<void> VerifyTlsBundle(std::vector<Bytes> certificates, Bytes roots) {
+  using Result = NetworkResult<void>;
+  const auto reject = [](int code) {
+    return Result::Failure(CryptoError(NetworkErrorCode::Authentication, code, "The TLS certificate chain is not trusted."));
+  };
+  std::scoped_lock lock(CryptoMutex());
+  const auto status = InitializeCrypto();
+  if (status != 0) return reject(status);
+  struct CertificateChain {
+    mbedtls_x509_crt value;
+    CertificateChain() { mbedtls_x509_crt_init(&value); }
+    ~CertificateChain() { mbedtls_x509_crt_free(&value); }
+  } trust, peer;
+  auto error = mbedtls_x509_crt_parse(&trust.value, reinterpret_cast<const unsigned char*>(roots.data()), roots.size());
+  if (error < 0 || !trust.value.raw.p) return reject(error);
+  for (const auto& der : certificates) {
+    error = mbedtls_x509_crt_parse_der(&peer.value, reinterpret_cast<const unsigned char*>(der.data()), der.size());
+    if (error != 0) return reject(error);
+  }
+  std::uint32_t flags = 0;
+  error = mbedtls_x509_crt_verify(&peer.value, &trust.value, nullptr, nullptr, &flags, nullptr, nullptr);
+  if (error != 0 || flags != 0) return reject(error != 0 ? error : static_cast<int>(flags));
+  return Result::Success();
+}
+
 #ifdef HUXERUI_LOCALNETWORK_WSLAY
 namespace {
 
@@ -604,6 +740,10 @@ public:
   void Close() noexcept {}
 };
 #endif
+void CloseTlsSocket(const std::shared_ptr<TlsSocket>& socket) noexcept {
+  if (socket) socket->Close();
+}
+
 } // namespace detail
 
 DeviceIdentity::DeviceIdentity(std::shared_ptr<detail::IdentityState> state) : state_(std::move(state)) {}
@@ -683,14 +823,7 @@ std::string PairingOffer::Code() const {
 #ifdef HUXERUI_LOCALNETWORK_TLS
 PairedConnection::PairedConnection(std::shared_ptr<detail::TlsSocket> socket, PeerId peer, ConnectionPath path)
     : socket_(std::move(socket)), peer_(peer), path_(std::move(path)),
-      input_(AsyncInputStream::FromReader([socket = socket_](std::stop_token stop, std::size_t maximum) {
-        return detail::ReadTls(socket, stop, maximum);
-      })),
-      output_(AsyncOutputStream::FromWriter(
-          [socket = socket_](std::stop_token stop, Bytes bytes) {
-            return detail::WriteTls(socket, stop, std::move(bytes));
-          },
-          [socket = socket_](std::stop_token stop) { return detail::FinishTls(socket, stop); })) {}
+      input_(detail::MakeTlsInput(socket_)), output_(detail::MakeTlsOutput(socket_)) {}
 #endif
 
 PairedConnection::PairedConnection(PairedConnection&&) noexcept = default;

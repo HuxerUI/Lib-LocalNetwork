@@ -60,6 +60,7 @@ endif ()
 if (IOS)
     list(APPEND LIBRARY_SOURCE_FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/src/discovery.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/src/tls_trust.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/src/wifi.mm"
     )
 endif ()
@@ -94,7 +95,7 @@ target_include_directories(huxerui_localnetwork PUBLIC
 
 if (WIN32)
     target_compile_definitions(huxerui_localnetwork PRIVATE NOMINMAX)
-    target_link_libraries(huxerui_localnetwork PRIVATE ws2_32 dnsapi iphlpapi wlanapi)
+    target_link_libraries(huxerui_localnetwork PRIVATE ws2_32 dnsapi iphlpapi wlanapi crypt32)
 elseif (ANDROID)
     target_link_libraries(huxerui_localnetwork PRIVATE android)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -130,6 +131,9 @@ if (WIN32 OR ANDROID OR IOS OR CMAKE_SYSTEM_NAME MATCHES "^(Darwin|Linux)$")
     huxerui_localnetwork_configure_tls()
     target_compile_definitions(huxerui_localnetwork PRIVATE HUXERUI_LOCALNETWORK_TLS)
     target_link_libraries(huxerui_localnetwork PRIVATE MbedTLS::mbedtls)
+    if (APPLE)
+        target_link_libraries(huxerui_localnetwork PRIVATE "-framework Security" "-framework CoreFoundation")
+    endif ()
     if (IOS)
         huxerui_localnetwork_bundle_ios_tls(huxerui_localnetwork)
     endif ()

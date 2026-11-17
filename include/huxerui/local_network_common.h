@@ -70,7 +70,7 @@ struct ConnectionPath {
 
 /// @brief Registers LocalNetwork's platform integration for an application.
 ///
-/// Add this function to the host's application hooks before running Android DNS-SD or Wi-Fi tasks.
+/// Add this function to the host's application hooks before running Android DNS-SD, Wi-Fi, or system-trusted TLS tasks.
 /// @param context Application context receiving the platform registrations.
 void Install(ApplicationContext& context);
 
