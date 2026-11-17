@@ -136,14 +136,15 @@ void DNSSD_API OnBrowse(DNSServiceRef, DNSServiceFlags flags, std::uint32_t inte
 
 struct ResolveState {
   std::string host;
+  ServiceTxt txt;
   std::uint32_t interface_index = 0;
   std::uint16_t port = 0;
   DNSServiceErrorType error = kDNSServiceErr_NoError;
 };
 
 void DNSSD_API OnResolve(DNSServiceRef, DNSServiceFlags, std::uint32_t interface_index, DNSServiceErrorType error,
-                        const char*, const char* host, std::uint16_t port, std::uint16_t,
-                        const unsigned char*, void* context) noexcept {
+                        const char*, const char* host, std::uint16_t port, std::uint16_t txt_length,
+                        const unsigned char* txt, void* context) noexcept {
   auto& state = *static_cast<ResolveState*>(context);
   state.error = error;
   if (error != kDNSServiceErr_NoError) return;
@@ -155,6 +156,7 @@ void DNSSD_API OnResolve(DNSServiceRef, DNSServiceFlags, std::uint32_t interface
     state.host = host;
     state.interface_index = interface_index;
     state.port = ntohs(port);
+    state.txt = txt && txt_length > 0 ? DecodeServiceTxt({txt, txt_length}) : ServiceTxt{};
   } catch (...) {
     state.error = kDNSServiceErr_NoMemory;
   }
@@ -212,10 +214,11 @@ class BonjourPublication final : public PublicationState {
 public:
   Task<NetworkResult<void>> Register(const ServiceAnnouncement& announcement, std::uint32_t interface_index) {
     using Result = NetworkResult<void>;
+    const auto txt = EncodeServiceTxt(announcement.txt);
     // Let Bonjour disambiguate identical instance labels on the same network.
     const auto error = DNSServiceRegister(request_.Out(), 0, interface_index,
         announcement.name.c_str(), announcement.type.c_str(), domain, nullptr, htons(announcement.endpoint.port),
-        0, nullptr, OnRegister, this);
+        static_cast<std::uint16_t>(txt.size()), txt.data(), OnRegister, this);
     if (error != kDNSServiceErr_NoError) co_return Result::Failure(BonjourError(error, "Could not publish the service."));
     const auto status = co_await DispatchUntil(request_, Clock::now() + operation_timeout, [this] { return finished_; });
     if (status != kDNSServiceErr_NoError) co_return Result::Failure(BonjourError(status, "Bonjour publication failed."));
@@ -242,16 +245,19 @@ private:
 } // namespace
 
 Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(
-    std::string type, std::chrono::milliseconds observation) {
+    std::string type, ServiceBrowseOptions options) {
   using Result = NetworkResult<std::vector<DiscoveredService>>;
+  if (options.scope && *options.scope > std::numeric_limits<std::uint32_t>::max()) {
+    co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "Invalid DNS-SD interface index."});
+  }
   BrowseState state;
   BonjourRequest request;
-  const auto started = DNSServiceBrowse(request.Out(), 0, kDNSServiceInterfaceIndexAny, type.c_str(),
-                                        domain, OnBrowse, &state);
+  const auto index = static_cast<std::uint32_t>(options.scope.value_or(kDNSServiceInterfaceIndexAny));
+  const auto started = DNSServiceBrowse(request.Out(), 0, index, type.c_str(), domain, OnBrowse, &state);
   if (started != kDNSServiceErr_NoError) {
     co_return Result::Failure(BonjourError(started, "Could not browse for Bonjour services."));
   }
-  const auto status = co_await DispatchUntil(request, Clock::now() + observation,
+  const auto status = co_await DispatchUntil(request, Clock::now() + options.observation,
                                             [&state] { return state.error != kDNSServiceErr_NoError; });
   const auto error = state.error != kDNSServiceErr_NoError ? state.error : status;
   if (error != kDNSServiceErr_NoError) co_return Result::Failure(BonjourError(error, "Bonjour browsing failed."));
@@ -297,7 +303,7 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
   if (addresses.endpoints.empty()) {
     co_return Result::Failure(BonjourError(kDNSServiceErr_Timeout, "Bonjour address resolution timed out."));
   }
-  co_return Result::Success({std::move(addresses.endpoints), std::nullopt});
+  co_return Result::Success({std::move(addresses.endpoints), std::nullopt, std::move(state.txt)});
 }
 
 Task<NetworkResult<std::shared_ptr<PublicationState>>> PublishPlatformService(ServiceAnnouncement announcement) {

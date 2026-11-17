@@ -108,12 +108,13 @@ void OnBrowse(AvahiServiceBrowser* browser, AvahiIfIndex index, AvahiProtocol pr
 
 struct ResolveState {
   std::optional<Endpoint> endpoint;
+  ServiceTxt txt;
   int error = AVAHI_OK;
 };
 
 void OnResolve(AvahiServiceResolver* resolver, AvahiIfIndex index, AvahiProtocol, AvahiResolverEvent event,
                const char*, const char*, const char*, const char*, const AvahiAddress* address,
-               std::uint16_t port, AvahiStringList*, AvahiLookupResultFlags, void* context) noexcept {
+               std::uint16_t port, AvahiStringList* txt, AvahiLookupResultFlags, void* context) noexcept {
   auto& state = *static_cast<ResolveState*>(context);
   if (event == AVAHI_RESOLVER_FAILURE) {
     state.error = avahi_client_errno(avahi_service_resolver_get_client(resolver));
@@ -135,6 +136,11 @@ void OnResolve(AvahiServiceResolver* resolver, AvahiIfIndex index, AvahiProtocol
         }
         scoped += "%" + std::to_string(index);
       }
+    }
+    state.txt.clear();
+    for (auto* item = txt; item; item = avahi_string_list_get_next(item)) {
+      const auto* text = reinterpret_cast<const char*>(avahi_string_list_get_text(item));
+      if (text) InsertServiceTxtItem(state.txt, {text, avahi_string_list_get_size(item)});
     }
     state.endpoint.emplace(Endpoint{std::move(scoped), port});
   } catch (...) {
@@ -186,12 +192,19 @@ public:
   ~LinuxPublication() override { Close(); }
 
   int Start(const ServiceAnnouncement& announcement, BindInterface bind) {
+    std::unique_ptr<AvahiStringList, decltype(&avahi_string_list_free)> txt(nullptr, avahi_string_list_free);
+    for (const auto& [key, value] : announcement.txt) {
+      auto* updated = avahi_string_list_add_pair(txt.get(), key.c_str(), value.c_str());
+      if (!updated) return AVAHI_ERR_NO_MEMORY;
+      (void)txt.release();
+      txt.reset(updated);
+    }
     std::scoped_lock lock(*session_);
     auto* client = session_->Client();
     auto* group = avahi_entry_group_new(client, OnStateChanged, this);
     if (!group) return avahi_client_errno(client);
-    const int added = avahi_entry_group_add_service(group, bind.index, bind.protocol, AVAHI_PUBLISH_USE_MULTICAST,
-        announcement.name.c_str(), announcement.type.c_str(), domain, nullptr, announcement.endpoint.port, nullptr);
+    const int added = avahi_entry_group_add_service_strlst(group, bind.index, bind.protocol, AVAHI_PUBLISH_USE_MULTICAST,
+        announcement.name.c_str(), announcement.type.c_str(), domain, nullptr, announcement.endpoint.port, txt.get());
     return added < 0 ? added : avahi_entry_group_commit(group);
   }
 
@@ -219,8 +232,12 @@ private:
 } // namespace
 
 Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(
-    std::string type, std::chrono::milliseconds observation) {
+    std::string type, ServiceBrowseOptions options) {
   using Result = NetworkResult<std::vector<DiscoveredService>>;
+  if (options.scope && *options.scope > static_cast<std::uint64_t>(std::numeric_limits<AvahiIfIndex>::max())) {
+    co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "Invalid DNS-SD interface index."});
+  }
+  const auto selected = options.scope ? static_cast<AvahiIfIndex>(*options.scope) : AVAHI_IF_UNSPEC;
   BrowseState state;
   auto opened = co_await RunWorker(AvahiSession::Open);
   if (!opened.Succeeded()) co_return Result::Failure(std::move(opened).Error());
@@ -228,12 +245,12 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(
   {
     std::scoped_lock lock(*session);
     auto* client = session->Client();
-    if (!avahi_service_browser_new(client, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC, type.c_str(), domain,
+    if (!avahi_service_browser_new(client, selected, AVAHI_PROTO_UNSPEC, type.c_str(), domain,
                                   AVAHI_LOOKUP_USE_MULTICAST, OnBrowse, &state)) {
       co_return Result::Failure(AvahiError(avahi_client_errno(client), "Could not browse for DNS-SD services."));
     }
   }
-  co_await Delay(observation);
+  co_await Delay(options.observation);
   std::scoped_lock lock(*session);
   const int error = state.error != AVAHI_OK ? state.error : session->Failure();
   if (error != AVAHI_OK) co_return Result::Failure(AvahiError(error, "DNS-SD browsing failed."));
@@ -271,7 +288,7 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
       std::scoped_lock lock(*session);
       const int error = state.error != AVAHI_OK ? state.error : session->Failure();
       if (error != AVAHI_OK) co_return Result::Failure(AvahiError(error, "DNS-SD resolution failed."));
-      if (state.endpoint) co_return Result::Success({{std::move(*state.endpoint)}, std::nullopt});
+      if (state.endpoint) co_return Result::Success({{std::move(*state.endpoint)}, std::nullopt, std::move(state.txt)});
     }
     co_await Delay(poll_interval);
   }

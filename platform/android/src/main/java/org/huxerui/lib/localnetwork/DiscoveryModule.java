@@ -62,7 +62,8 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                 switch (method) {
                     case "browse":
                         browse(arguments.requireField("type").requireString(),
-                                arguments.requireField("milliseconds").requireInt64(), result);
+                                arguments.requireField("milliseconds").requireInt64(),
+                                arguments.requireField("network").requireInt64(), result);
                         break;
                     case "resolve": resolve(arguments, result); break;
                     case "publish": publish(arguments, result); break;
@@ -79,7 +80,12 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
             return null;
         }
 
-        private void browse(String type, long observation, HuxerUIPlatformChannel.Result result) {
+        private void browse(String type, long observation, long network, HuxerUIPlatformChannel.Result result) {
+            if (network != 0 && Build.VERSION.SDK_INT < 33) {
+                result.fail("localnetwork/discovery-unsupported", "Wi-Fi-scoped discovery requires Android 13 or later.",
+                        PlatformPayload.nullValue());
+                return;
+            }
             final Map<String, PlatformPayload> found = new LinkedHashMap<>();
             // Older NSD implementations require an application multicast lock during Wi-Fi browsing.
             if (wifi != null && (Build.VERSION.SDK_INT < 33 || SdkExtensions.getExtensionVersion(33) < 7)) {
@@ -114,7 +120,12 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                 @Override public void onStopDiscoveryFailed(String serviceType, int error) {}
                 @Override public void onDiscoveryStopped(String serviceType) {}
             };
-            manager.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, discovery);
+            if (Build.VERSION.SDK_INT >= 33 && network != 0) {
+                manager.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, Network.fromNetworkHandle(network),
+                        main::post, discovery);
+            } else {
+                manager.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, discovery);
+            }
             timeout = () -> {
                 if (discovery == null) return;
                 stopBrowse();
@@ -153,6 +164,13 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                         fields.put("port", PlatformPayload.int64(service.getPort()));
                         fields.put("network", PlatformPayload.int64(networkHandle(service)));
                         fields.put("addresses", PlatformPayload.list(addresses));
+                        Map<String, PlatformPayload> attributes = new LinkedHashMap<>();
+                        // Keep incoming bytes intact so the common adapter can reject non-text attributes.
+                        for (Map.Entry<String, byte[]> entry : service.getAttributes().entrySet()) {
+                            byte[] value = entry.getValue();
+                            attributes.put(entry.getKey(), PlatformPayload.bytes(value == null ? new byte[0] : value));
+                        }
+                        fields.put("txt", PlatformPayload.object(attributes));
                         result.complete(PlatformPayload.object(fields));
                     });
                 }
@@ -168,6 +186,9 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
         private void publish(PlatformPayload arguments, HuxerUIPlatformChannel.Result result) {
             NsdServiceInfo service = fromArguments(arguments);
             service.setPort((int) arguments.requireField("port").requireInt64());
+            for (Map.Entry<String, PlatformPayload> attr : arguments.requireField("txt").fields().entrySet()) {
+                service.setAttribute(attr.getKey(), attr.getValue().requireString());
+            }
             String host = arguments.requireField("host").requireString();
             Network bound = networkForAddress(host);
             if (bound == null) {

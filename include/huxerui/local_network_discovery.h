@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -24,6 +25,7 @@ namespace huxerui::localnetwork {
 
 namespace detail {
 class PublicationState;
+struct ServiceBrowserState;
 }
 
 /// @brief A discovered service in the local DNS-SD domain.
@@ -40,12 +42,75 @@ struct DiscoveredService {
   std::uint64_t scope = 0;
 };
 
+/// @brief Changes in the set of services observed by a service browser.
+enum class ServiceChange {
+  Added,   ///< A service became visible on its discovery scope.
+  Changed, ///< The system reported a different display label for the same service reference.
+  Removed, ///< A service is absent from a later successful observation.
+};
+
+/// @brief A change to one service instance on one discovery scope.
+struct ServiceEvent {
+  /// The change relative to the previous observation.
+  ServiceChange change;
+  /// The service reference, including its scope. For removal this is the last observed reference.
+  DiscoveredService service;
+};
+
+/// @brief Options for continuously observing a local DNS-SD service type.
+struct ServiceBrowseOptions {
+  /// Positive interval per observation, up to ten seconds.
+  std::chrono::milliseconds observation = std::chrono::milliseconds(2500);
+  /// Optional interface index or Android network handle. Only results verified on this scope are delivered.
+  std::optional<std::uint64_t> scope;
+};
+
+/// @brief A move-only browser that reports changes across successive DNS-SD observations.
+///
+/// Each outstanding NextAsync() either returns a queued change or observes another system snapshot. Keep one
+/// consumer per browser. Resolve the returned reference to get current addresses and TXT attributes.
+class ServiceBrowser final {
+public:
+  /// Transfers ownership of the browser.
+  ServiceBrowser(ServiceBrowser&&) noexcept;
+  /// Closes this browser and transfers ownership of the supplied browser.
+  ServiceBrowser& operator=(ServiceBrowser&&) noexcept;
+  /// Closes the browser.
+  ~ServiceBrowser();
+
+  /// @brief Waits for the next visible service change.
+  /// @return A lazy task yielding a change, or a NetworkError. A concurrent read returns Busy.
+  Task<NetworkResult<ServiceEvent>> NextAsync();
+
+  /// Stops the browser. If a system observation has started, the pending read returns Closed after it completes.
+  void Close() noexcept;
+
+private:
+  explicit ServiceBrowser(std::shared_ptr<detail::ServiceBrowserState> state);
+  std::shared_ptr<detail::ServiceBrowserState> state_;
+  friend NetworkResult<ServiceBrowser> BrowseServiceChanges(std::string type, ServiceBrowseOptions options);
+};
+
+/// @brief Creates an on-demand browser for a local TCP service type.
+/// @param type TCP service type using the same syntax as BrowseServicesAsync().
+/// @param options Observation interval and optional verified discovery scope.
+/// @return An owning browser, or a NetworkError if the options or platform do not support browsing.
+NetworkResult<ServiceBrowser> BrowseServiceChanges(std::string type, ServiceBrowseOptions options = {});
+
+/// @brief Portable DNS-SD TXT attributes exposed as public UTF-8 text.
+///
+/// Keys contain printable ASCII excluding '=' and are compared without ASCII case. Resolved keys are lowercase.
+/// Values are UTF-8 without embedded nulls. Incoming presence-only keys use an empty value. Keep TXT public.
+using ServiceTxt = std::map<std::string, std::string, std::less<>>;
+
 /// @brief A resolved service's addresses and Android route constraint, when known.
 struct ResolvedService {
   /// Candidate numeric endpoints with the resolved TCP port. Preserve any IPv6 scope included in the host.
   std::vector<Endpoint> endpoints;
   /// Available when Android supplies a network handle. Pass it to TcpDialOptions::android_network for each dial.
   std::optional<std::uint64_t> android_network;
+  /// Text attributes returned by the system. Invalid or non-text attributes are ignored.
+  ServiceTxt txt;
 };
 
 /// @brief A service announcement in the local DNS-SD domain.
@@ -58,6 +123,8 @@ struct ServiceAnnouncement {
   /// The active listener's numeric LAN address and nonzero port. For a wildcard listener, supply the concrete
   /// address of the interface to advertise and the actual port from TcpListener::LocalEndpoint().
   Endpoint endpoint;
+  /// Public metadata. The key, '=', and value must fit in 255 bytes per entry. The entire record is capped at 1024 bytes.
+  ServiceTxt txt;
 };
 
 /// @brief A move-only registration of a DNS-SD service.
@@ -93,6 +160,15 @@ bool IsDiscoverySupported() noexcept;
 /// @return A lazy task yielding the services still visible at the end of the interval, or a NetworkError.
 Task<NetworkResult<std::vector<DiscoveredService>>> BrowseServicesAsync(
     std::string type, std::chrono::milliseconds observation = std::chrono::milliseconds(2500));
+
+/// @brief Browses on a specified LAN interface or Android network.
+/// @param type TCP service type using the same syntax as unscoped browsing.
+/// @param observation Positive interval up to ten seconds.
+/// @param scope Nonzero interface index on desktop or Apple platforms, or a nonzero Android network handle.
+/// Use std::nullopt to browse all available interfaces. Android requires API level 33 for a specified scope.
+/// @return A lazy task yielding a snapshot on the requested scope, or a NetworkError.
+Task<NetworkResult<std::vector<DiscoveredService>>> BrowseServicesAsync(
+    std::string type, std::chrono::milliseconds observation, std::optional<std::uint64_t> scope);
 
 /// @brief Resolves a discovered service on its original interface or network, when available.
 ///

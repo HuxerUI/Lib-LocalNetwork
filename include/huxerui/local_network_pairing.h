@@ -39,7 +39,7 @@ struct PeerId {
   bool operator==(const PeerId&) const = default;
 };
 
-/// @brief A copyable TLS device identity. Copies refer to the same private key.
+/// @brief A copyable TLS device identity. Copies share the private key and peer revocations.
 class DeviceIdentity final {
 public:
   /// @brief Creates a new P-256 key and self-signed certificate off the application thread.
@@ -56,6 +56,17 @@ public:
   Task<NetworkResult<Bytes>> ExportPrivateKeyAsync() const;
   /// Returns the stable identifier of the public key, independent of the certificate's lifetime.
   const PeerId& Id() const noexcept;
+
+  /// @brief Rejects future pairing attempts and closes active sessions for this peer.
+  ///
+  /// Use the same identity or one of its copies for every listener and dial that should observe the revocation.
+  /// The application removes the peer from stored trust and reapplies persisted revocations when restoring an identity.
+  /// Calling this again for the same peer has no additional effect.
+  /// @param peer Public-key identifier to revoke for inbound and outbound sessions.
+  void RevokePeer(const PeerId& peer) const;
+
+  /// Checks the revocations shared by this identity and its copies.
+  bool IsPeerRevoked(const PeerId& peer) const;
 
 private:
   explicit DeviceIdentity(std::shared_ptr<detail::IdentityState> state);
@@ -157,6 +168,7 @@ bool IsPairingSupported() noexcept;
 ///
 /// Validates the listener's public key against the credential before sending any invitation secret.
 /// For a new pairing, the task waits for the listener's decision. Save Peer() after success to reconnect later.
+/// A peer revoked on this identity is rejected, including when a valid pairing code is supplied.
 /// @param endpoint Peer address and port obtained separately from the credential.
 /// @param identity Local device identity used for TLS client authentication.
 /// @param credential Expected peer identity and, for first-time pairing, the invitation secret.
@@ -168,6 +180,7 @@ Task<NetworkResult<PairedConnection>> ConnectPairedAsync(
 /// @brief Upgrades an accepted TCP connection to TLS and authorizes the peer before exposing application bytes.
 ///
 /// Save Peer() after success if the application should allow future reconnects from this device.
+/// A peer revoked on this identity is rejected even if the policy trusts its public key.
 /// @param connection A newly accepted connection with both streams still unused.
 /// @param identity Local identity used for TLS server authentication.
 /// @param policy Remembered peers, optional invitation, and user approval callback.

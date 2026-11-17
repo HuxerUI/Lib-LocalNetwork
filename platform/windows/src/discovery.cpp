@@ -89,6 +89,7 @@ struct BrowseRequest {
   std::mutex mutex;
   std::wstring query;
   std::string type;
+  DWORD scope = 0;
   std::map<std::string, DiscoveredService, std::less<>> services;
   DWORD error = ERROR_SUCCESS;
   DNS_SERVICE_CANCEL cancel{};
@@ -116,7 +117,7 @@ void WINAPI OnBrowse(DWORD status, void* cookie, PDNS_RECORD records) noexcept {
       if (record->dwTtl == 0) {
         state->services.erase(key);
       } else if (state->services.size() < 128) {
-        state->services.try_emplace(key, DiscoveredService{Utf8(full.substr(0, separator)), state->type, key, 0});
+        state->services.try_emplace(key, DiscoveredService{Utf8(full.substr(0, separator)), state->type, key, state->scope});
       }
     }
   } catch (...) {
@@ -145,6 +146,15 @@ void WINAPI OnResolve(DWORD status, void* cookie, PDNS_SERVICE_INSTANCE value) n
       return;
     }
     ResolvedService service;
+    if (instance->keys && instance->values) {
+      // DNSAPI exposes TXT properties as Unicode strings.
+      for (DWORD i = 0; i < instance->dwPropertyCount; ++i) {
+        if (!instance->keys[i]) continue;
+        const auto* value = instance->values[i];
+        const auto text = Utf8(value ? std::wstring_view(value) : std::wstring_view{});
+        if (!value || !*value || !text.empty()) InsertServiceTxt(service.txt, Utf8(instance->keys[i]), text);
+      }
+    }
     std::array<char, INET6_ADDRSTRLEN> address{};
     if (instance->ip4Address && InetNtopA(AF_INET, instance->ip4Address, address.data(), address.size())) {
       service.endpoints.push_back({address.data(), instance->wPort});
@@ -251,10 +261,13 @@ private:
 
 } // namespace
 
-Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(std::string type,
-                                                                           std::chrono::milliseconds observation) {
+Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(std::string type, ServiceBrowseOptions options) {
   using Result = NetworkResult<std::vector<DiscoveredService>>;
+  if (options.scope && *options.scope > std::numeric_limits<DWORD>::max()) {
+    co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "Invalid DNS-SD interface index."});
+  }
   auto state = std::make_shared<BrowseRequest>();
+  state->scope = static_cast<DWORD>(options.scope.value_or(0));
   state->type = std::move(type);
   state->query = Wide(state->type + ".local");
   const auto cookie = Browsing().Retain(state);
@@ -267,11 +280,11 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(std::
       Browsing().Release(cookie);
     }
   } owned{*state, cookie};
-  DNS_SERVICE_BROWSE_REQUEST request{DNS_QUERY_REQUEST_VERSION1, 0, state->query.c_str(), {OnBrowse}, cookie};
+  DNS_SERVICE_BROWSE_REQUEST request{DNS_QUERY_REQUEST_VERSION1, state->scope, state->query.c_str(), {OnBrowse}, cookie};
   const auto status = DnsServiceBrowse(&request, &state->cancel);
   if (status != DNS_REQUEST_PENDING) co_return Result::Failure(Error(status, "Could not browse for DNS-SD services."));
   owned.started = true;
-  co_await Delay(observation);
+  co_await Delay(options.observation);
   std::scoped_lock lock(state->mutex);
   if (state->error != ERROR_SUCCESS) co_return Result::Failure(Error(state->error, "DNS-SD browsing failed."));
   std::vector<DiscoveredService> entries;
@@ -335,8 +348,16 @@ Task<NetworkResult<std::shared_ptr<PublicationState>>> PublishPlatformService(Se
       (v6 && (IN6_IS_ADDR_UNSPECIFIED(ipv6) || IN6_IS_ADDR_LOOPBACK(ipv6)))) {
     co_return Result::Failure(Error(ERROR_INVALID_PARAMETER, "DNS-SD publication requires a concrete bind address."));
   }
+  std::vector<std::pair<std::wstring, std::wstring>> properties;
+  properties.reserve(announcement.txt.size());
+  for (const auto& [key, value] : announcement.txt) properties.emplace_back(Wide(key), Wide(value));
+  std::vector<PCWSTR> keys, values;
+  for (const auto& [key, text] : properties) {
+    keys.push_back(key.c_str());
+    values.push_back(text.c_str());
+  }
   Instance value(DnsServiceConstructInstance(service.c_str(), host.c_str(), v4, v6, announcement.endpoint.port,
-                                              0, 0, 0, nullptr, nullptr), DnsServiceFreeInstance);
+      0, 0, static_cast<DWORD>(keys.size()), keys.data(), values.data()), DnsServiceFreeInstance);
   if (!value) co_return Result::Failure(Error(GetLastError(), "Could not construct the DNS-SD registration."));
   // A registration on every interface can resolve to a VPN address even though the listener only accepts Wi-Fi.
   value->dwInterfaceIndex = BindInterface(v4, v6);

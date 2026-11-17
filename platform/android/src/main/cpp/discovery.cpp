@@ -31,8 +31,10 @@ private:
 };
 
 NetworkError Failure(const PlatformError& error) {
-  return {error.code == "localnetwork/permission" ? NetworkErrorCode::PermissionDenied : NetworkErrorCode::DiscoveryFailed,
-          0, error.message};
+  auto code = NetworkErrorCode::DiscoveryFailed;
+  if (error.code == "localnetwork/permission") code = NetworkErrorCode::PermissionDenied;
+  if (error.code == "localnetwork/discovery-unsupported") code = NetworkErrorCode::Unsupported;
+  return {code, 0, error.message};
 }
 
 std::shared_ptr<DiscoveryModule> Open() {
@@ -49,10 +51,11 @@ void InstallPlatformDiscovery(ApplicationContext& context) {
 }
 
 Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(
-    std::string type, std::chrono::milliseconds observation) {
+    std::string type, ServiceBrowseOptions options) {
   using Result = NetworkResult<std::vector<DiscoveredService>>;
   auto module = Open();
-  PlatformPayload request = PlatformPayload::Object{{"type", type}, {"milliseconds", observation.count()}};
+  PlatformPayload request = PlatformPayload::Object{{"type", type}, {"milliseconds", options.observation.count()},
+      {"network", static_cast<std::int64_t>(options.scope.value_or(0))}};
   auto browsed = co_await module->Call("browse", std::move(request));
   if (const auto* error = std::get_if<PlatformError>(&browsed)) co_return Result::Failure(Failure(*error));
   std::vector<DiscoveredService> services;
@@ -81,6 +84,12 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
   for (const auto& address : fields.at("addresses").AsList()) {
     value.endpoints.push_back({std::string(address.AsString()), static_cast<std::uint16_t>(port)});
   }
+  for (const auto& [key, text] : fields.at("txt").AsObject()) {
+    const auto bytes = text.AsBytes();
+    const auto chars = bytes.empty() ? std::string_view{} :
+        std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    InsertServiceTxt(value.txt, key, chars);
+  }
   if (value.endpoints.empty()) {
     co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "The service has no usable addresses."});
   }
@@ -90,9 +99,11 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
 Task<NetworkResult<std::shared_ptr<PublicationState>>> PublishPlatformService(ServiceAnnouncement announcement) {
   using Result = NetworkResult<std::shared_ptr<PublicationState>>;
   auto module = Open();
+  PlatformPayload::Object txt;
+  for (auto& [key, value] : announcement.txt) txt.emplace(key, std::move(value));
   PlatformPayload request = PlatformPayload::Object{
       {"name", announcement.name}, {"type", announcement.type},
-      {"host", announcement.endpoint.host}, {"port", announcement.endpoint.port}};
+      {"host", announcement.endpoint.host}, {"port", announcement.endpoint.port}, {"txt", std::move(txt)}};
   auto registered = co_await module->Call("publish", std::move(request));
   if (const auto* error = std::get_if<PlatformError>(&registered)) co_return Result::Failure(Failure(*error));
   co_return Result::Success(std::move(module));

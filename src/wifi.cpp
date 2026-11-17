@@ -1,4 +1,5 @@
 #include "wifi_backend.h"
+#include "utf8.h"
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -9,22 +10,7 @@
 namespace huxerui::localnetwork::detail {
 
 bool ValidWifiSsid(std::string_view ssid) {
-  if (ssid.empty() || ssid.size() > 32) return false;
-  for (std::size_t i = 0; i < ssid.size();) {
-    const auto first = static_cast<unsigned char>(ssid[i++]);
-    if (first == 0) return false;
-    if (first < 0x80) continue;
-    if (first < 0xC2 || first > 0xF4) return false;
-    const std::size_t trailing = first < 0xE0 ? 1 : first < 0xF0 ? 2 : 3;
-    if (ssid.size() - i < trailing) return false;
-    const auto next = static_cast<unsigned char>(ssid[i]);
-    if ((first == 0xE0 && next < 0xA0) || (first == 0xED && next >= 0xA0) ||
-        (first == 0xF0 && next < 0x90) || (first == 0xF4 && next >= 0x90)) return false;
-    for (std::size_t j = 0; j < trailing; ++j) {
-      if ((static_cast<unsigned char>(ssid[i++]) & 0xC0) != 0x80) return false;
-    }
-  }
-  return true;
+  return !ssid.empty() && ssid.size() <= 32 && ValidUtf8Text(ssid);
 }
 
 } // namespace huxerui::localnetwork::detail
@@ -44,6 +30,17 @@ constexpr bool wifi_join_supported = true;
 #else
 constexpr bool wifi_join_supported = wifi_scan_supported;
 #endif
+
+constexpr std::size_t max_http_body = 1024 * 1024;
+
+bool ValidHttpHeader(const HttpHeader& header) {
+  constexpr std::string_view punctuation = "!#$%&'*+-.^_`|~";
+  return !header.name.empty() && header.name.size() <= 256 && header.value.size() <= 8192 &&
+      std::ranges::all_of(header.name, [punctuation](char ch) {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+               (ch >= '0' && ch <= '9') || punctuation.find(ch) != std::string_view::npos;
+      }) && header.value.find_first_of("\r\n") == std::string::npos && detail::ValidUtf8Text(header.value);
+}
 
 } // namespace
 
@@ -94,6 +91,50 @@ Task<NetworkResult<WifiJoinResult>> JoinWifiAsync(WifiJoinRequest request) {
   } else {
     co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Join the hotspot in system Wi-Fi settings."});
   }
+}
+
+Task<NetworkResult<std::shared_ptr<const WifiNetworkLease>>> SelectWifiRouteAsync(std::string ssid) {
+  using Result = NetworkResult<std::shared_ptr<const WifiNetworkLease>>;
+  if (!detail::ValidWifiSsid(ssid)) {
+    co_return Result::Failure({NetworkErrorCode::InvalidWifiConfiguration, 0, "Enter a valid Wi-Fi network name."});
+  }
+#ifdef __ANDROID__
+  co_return co_await detail::SelectPlatformWifiRoute(std::move(ssid));
+#else
+  co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Selecting an app-scoped Wi-Fi route requires Android."});
+#endif
+}
+
+Task<NetworkResult<WifiJoinResult>> JoinSavedWifiProfileAsync(std::string profile) {
+  using Result = NetworkResult<WifiJoinResult>;
+  if (profile.empty() || profile.size() > 1020 || !detail::ValidUtf8Text(profile)) {
+    co_return Result::Failure({NetworkErrorCode::InvalidWifiConfiguration, 0, "Invalid Wi-Fi profile identifier."});
+  }
+#if defined(_WIN32) || defined(HUXERUI_LOCALNETWORK_GIO)
+  co_return co_await detail::JoinPlatformWifiProfile(std::move(profile));
+#else
+  co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Activate the Wi-Fi profile in system settings."});
+#endif
+}
+
+Task<NetworkResult<HttpResponse>> SendWifiHttpAsync(HttpRequest request, std::shared_ptr<const WifiNetworkLease> network) {
+  using Result = NetworkResult<HttpResponse>;
+  if (request.url.size() > 8192 || !detail::ValidUtf8Text(request.url) ||
+      !(request.url.starts_with("http://") || request.url.starts_with("https://")) ||
+      !request.timeout || *request.timeout <= std::chrono::milliseconds::zero() ||
+      *request.timeout > std::chrono::minutes(10) || request.body.size() > max_http_body ||
+      request.headers.size() > 128 || !std::ranges::all_of(request.headers, ValidHttpHeader) ||
+      ((request.method == HttpMethod::Get || request.method == HttpMethod::Head) && !request.body.empty())) {
+    co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "Invalid accessory HTTP request."});
+  }
+#ifdef __ANDROID__
+  if (!network || !network->AndroidNetwork()) {
+    co_return Result::Failure({NetworkErrorCode::NetworkLost, 0, "The selected Wi-Fi network was lost."});
+  }
+  co_return co_await detail::SendPlatformWifiHttp(std::move(request), std::move(network));
+#else
+  co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Wi-Fi-bound HTTP requires Android."});
+#endif
 }
 
 } // namespace huxerui::localnetwork

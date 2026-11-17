@@ -429,13 +429,14 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
             value.status = "Searching the local network...";
           });
           running = tasks.Launch([state, handle]() -> Task<void> {
-            auto result = co_await BrowseServicesAsync(service_type);
+            auto result = co_await BrowseServicesAsync(service_type, 2500ms, handle);
             if (!result.Succeeded()) {
-              FinishOperation(state, FormatError(result.Error()));
+              FinishOperation(state, handle && result.Error().code == NetworkErrorCode::Unsupported
+                  ? "Discovery is unavailable on this Wi-Fi route. Use an address or QR invitation."
+                  : FormatError(result.Error()));
               co_return;
             }
             auto services = std::move(result).Value();
-            if (handle) std::erase_if(services, [handle](const auto& service) { return service.scope != *handle; });
             const bool empty = services.empty();
             state.Update([&](PreviewState& value) { value.discovered = std::move(services); });
             FinishOperation(state, empty

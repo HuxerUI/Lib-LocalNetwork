@@ -1,13 +1,15 @@
 #include <huxerui/local_network_pairing.h>
 
 #include <algorithm>
+#include <atomic>
+#include <map>
+#include <mutex>
 #include <utility>
 
 #ifdef HUXERUI_LOCALNETWORK_TLS
 #include "socket_io.h"
 
 #include <cstdio>
-#include <mutex>
 #include <stop_token>
 
 #include <mbedtls/ecp.h>
@@ -93,7 +95,14 @@ using Clock = std::chrono::steady_clock;
 using Secret = std::array<std::uint8_t, 16>;
 
 struct IdentityState {
+  struct PeerSessions {
+    bool revoked = false;
+    std::vector<std::weak_ptr<TlsSocket>> sockets;
+  };
+
   PeerId id;
+  std::mutex peers_mutex;
+  std::map<decltype(PeerId::digest), PeerSessions> peers;
 #ifdef HUXERUI_LOCALNETWORK_TLS
   mbedtls_pk_context key;
   mbedtls_x509_crt certificate;
@@ -118,6 +127,21 @@ struct PairingAccess {
   static const std::shared_ptr<IdentityState>& Identity(const DeviceIdentity& identity) { return identity.state_; }
   static const std::shared_ptr<InvitationState>& Invitation(const PairingOffer& offer) { return offer.state_; }
   static const Secret& Proof(const PairingCode& code) { return code.secret_; }
+  static bool Track(const DeviceIdentity& identity, const PeerId& peer, const std::shared_ptr<TlsSocket>& socket) {
+    auto& state = *identity.state_;
+    std::scoped_lock lock(state.peers_mutex);
+    // Track only live sockets. Revocations remain effective after all associated sessions close.
+    for (auto entry = state.peers.begin(); entry != state.peers.end();) {
+      auto& sessions = entry->second;
+      std::erase_if(sessions.sockets, [](const auto& session) { return session.expired(); });
+      if (!sessions.revoked && sessions.sockets.empty()) entry = state.peers.erase(entry);
+      else ++entry;
+    }
+    auto& sessions = state.peers[peer.digest];
+    if (sessions.revoked) return false;
+    sessions.sockets.push_back(socket);
+    return true;
+  }
   static PairedConnection Connection(std::shared_ptr<TlsSocket> socket, PeerId peer, ConnectionPath path) {
     return PairedConnection(std::move(socket), peer, std::move(path));
   }
@@ -310,14 +334,23 @@ public:
   int Handshake() { std::scoped_lock lock(CryptoMutex()); return mbedtls_ssl_handshake(&tls_); }
   int Read(std::span<unsigned char> bytes) {
     std::scoped_lock lock(CryptoMutex());
-    return mbedtls_ssl_read(&tls_, bytes.data(), bytes.size());
+    if (closed_) return MBEDTLS_ERR_NET_CONN_RESET;
+    const auto result = mbedtls_ssl_read(&tls_, bytes.data(), bytes.size());
+    // TLS may retain decrypted data even after TCP closes. A closed session must not deliver it.
+    return closed_ ? MBEDTLS_ERR_NET_CONN_RESET : result;
   }
   int Write(std::span<const unsigned char> bytes) {
     std::scoped_lock lock(CryptoMutex());
+    if (closed_) return MBEDTLS_ERR_NET_CONN_RESET;
     return mbedtls_ssl_write(&tls_, bytes.data(), bytes.size());
   }
-  int Finish() { std::scoped_lock lock(CryptoMutex()); return mbedtls_ssl_close_notify(&tls_); }
-  void Close() noexcept { if (socket_) socket_->Close(); }
+  int Finish() {
+    std::scoped_lock lock(CryptoMutex());
+    return closed_ ? MBEDTLS_ERR_NET_CONN_RESET : mbedtls_ssl_close_notify(&tls_);
+  }
+  void Close() noexcept {
+    if (!closed_.exchange(true) && socket_) socket_->Close();
+  }
 
 private:
   static int SendEncrypted(void* context, const unsigned char* data, std::size_t size) {
@@ -336,6 +369,7 @@ private:
 
   std::shared_ptr<SocketIo> socket_;
   std::shared_ptr<IdentityState> identity_;
+  std::atomic_bool closed_ = false;
   mbedtls_ssl_config config_;
   mbedtls_ssl_context tls_;
 };
@@ -477,6 +511,26 @@ public:
 DeviceIdentity::DeviceIdentity(std::shared_ptr<detail::IdentityState> state) : state_(std::move(state)) {}
 const PeerId& DeviceIdentity::Id() const noexcept { return state_->id; }
 
+void DeviceIdentity::RevokePeer(const PeerId& peer) const {
+  std::vector<std::weak_ptr<detail::TlsSocket>> sockets;
+  {
+    std::scoped_lock lock(state_->peers_mutex);
+    auto& sessions = state_->peers[peer.digest];
+    sessions.revoked = true;
+    sockets.swap(sessions.sockets);
+  }
+  // Close outside the registry lock. Socket shutdown also releases any retained network lease.
+  for (const auto& session : sockets) {
+    if (auto socket = session.lock()) socket->Close();
+  }
+}
+
+bool DeviceIdentity::IsPeerRevoked(const PeerId& peer) const {
+  std::scoped_lock lock(state_->peers_mutex);
+  const auto found = state_->peers.find(peer.digest);
+  return found != state_->peers.end() && found->second.revoked;
+}
+
 Task<NetworkResult<DeviceIdentity>> DeviceIdentity::GenerateAsync() {
 #ifdef HUXERUI_LOCALNETWORK_TLS
   auto identity = co_await RunWorker(detail::PrepareIdentity, std::optional<Bytes>{});
@@ -572,6 +626,9 @@ Task<NetworkResult<PairedConnection>> ConnectPairedAsync(Endpoint endpoint, Devi
                                                          PeerCredential credential, TcpDialOptions options) {
   using Result = NetworkResult<PairedConnection>;
 #ifdef HUXERUI_LOCALNETWORK_TLS
+  const auto* offer = std::get_if<PairingCode>(&credential);
+  const auto& expected = offer ? offer->Host() : std::get<PeerId>(credential);
+  if (identity.IsPeerRevoked(expected)) co_return Result::Failure(detail::PairingRejected());
   auto dialed = co_await DialTcpAsync(std::move(endpoint), options);
   if (!dialed.Succeeded()) co_return Result::Failure(std::move(dialed).Error());
   auto connection = std::move(dialed).Value();
@@ -581,9 +638,11 @@ Task<NetworkResult<PairedConnection>> ConnectPairedAsync(Endpoint endpoint, Devi
   const auto deadline = detail::Clock::now() + detail::handshake_timeout;
   auto peer = co_await detail::Authenticate(*socket, false, deadline);
   if (!peer.Succeeded()) co_return Result::Failure(std::move(peer).Error());
-  const auto* offer = std::get_if<PairingCode>(&credential);
-  if (peer.Value() != (offer ? offer->Host() : std::get<PeerId>(credential))) {
+  if (peer.Value() != expected) {
     co_return Result::Failure({NetworkErrorCode::Authentication, 0, "The peer public key does not match."});
+  }
+  if (!detail::PairingAccess::Track(identity, peer.Value(), socket)) {
+    co_return Result::Failure(detail::PairingRejected());
   }
   std::array<unsigned char, 1 + detail::Secret{}.size()> request{};
   request.front() = offer ? detail::pair : detail::reconnect;
@@ -595,7 +654,9 @@ Task<NetworkResult<PairedConnection>> ConnectPairedAsync(Endpoint endpoint, Devi
   auto received = co_await detail::ReadControl(*socket, std::span(&response, 1),
                                                 deadline + std::chrono::minutes(5));
   if (!received.Succeeded()) co_return Result::Failure(std::move(received).Error());
-  if (response != detail::accepted) co_return Result::Failure(detail::PairingRejected());
+  if (response != detail::accepted || identity.IsPeerRevoked(peer.Value())) {
+    co_return Result::Failure(detail::PairingRejected());
+  }
   co_return Result::Success(detail::PairingAccess::Connection(std::move(socket), peer.Value(), std::move(path)));
 #else
   co_return Result::Failure(Unsupported());
@@ -612,6 +673,9 @@ Task<NetworkResult<PairedConnection>> AcceptPairedAsync(TcpConnection connection
   const auto deadline = detail::Clock::now() + detail::handshake_timeout;
   auto peer = co_await detail::Authenticate(*socket, true, deadline);
   if (!peer.Succeeded()) co_return Result::Failure(std::move(peer).Error());
+  if (!detail::PairingAccess::Track(identity, peer.Value(), socket)) {
+    co_return Result::Failure(detail::PairingRejected());
+  }
   std::array<unsigned char, 1 + detail::Secret{}.size()> request{};
   auto received = co_await detail::ReadControl(*socket, request, deadline);
   if (!received.Succeeded()) co_return Result::Failure(std::move(received).Error());
@@ -625,11 +689,12 @@ Task<NetworkResult<PairedConnection>> AcceptPairedAsync(TcpConnection connection
     }
   }
   mbedtls_platform_zeroize(request.data(), request.size());
+  if (identity.IsPeerRevoked(peer.Value())) co_return Result::Failure(detail::PairingRejected());
   const unsigned char response = allowed ? detail::accepted : 0;
   auto sent = co_await detail::WriteControl(*socket, std::span(&response, 1),
                                              detail::Clock::now() + detail::handshake_timeout);
   if (!sent.Succeeded()) co_return Result::Failure(std::move(sent).Error());
-  if (!allowed) co_return Result::Failure(detail::PairingRejected());
+  if (!allowed || identity.IsPeerRevoked(peer.Value())) co_return Result::Failure(detail::PairingRejected());
   co_return Result::Success(detail::PairingAccess::Connection(std::move(socket), peer.Value(), std::move(path)));
 #else
   co_return Result::Failure(Unsupported());

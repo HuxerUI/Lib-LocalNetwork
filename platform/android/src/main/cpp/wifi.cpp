@@ -55,6 +55,19 @@ WifiSecurity DecodeSecurity(std::string_view value) {
   return WifiSecurity::Other;
 }
 
+NetworkResult<std::shared_ptr<const WifiNetworkLease>> RetainRoute(
+    std::shared_ptr<WifiModule> module, PlatformResult<PlatformPayload> result) {
+  using Result = NetworkResult<std::shared_ptr<const WifiNetworkLease>>;
+  if (const auto* error = std::get_if<PlatformError>(&result)) {
+    return Result::Failure(WifiFailure(*error, NetworkErrorCode::WifiJoinFailed));
+  }
+  module->SetNetwork(static_cast<std::uint64_t>(std::get<PlatformPayload>(result).AsInteger()));
+  if (!module->AndroidNetwork()) {
+    return Result::Failure({NetworkErrorCode::NetworkLost, 0, "The requested Wi-Fi network was lost."});
+  }
+  return Result::Success(WifiNetworkAccess::Create(std::move(module)));
+}
+
 } // namespace
 
 void InstallPlatformWifi(ApplicationContext& context) {
@@ -90,15 +103,56 @@ Task<NetworkResult<WifiJoinResult>> JoinPlatformWifi(WifiJoinRequest request) {
       request.security == WifiSecurity::Wpa2Personal ? "wpa2" : "wpa3";
   PlatformPayload arguments = PlatformPayload::Object{
       {"ssid", std::move(request.ssid)}, {"security", security}, {"passphrase", std::move(request.passphrase)}};
-  auto joined = co_await module->Call("join", std::move(arguments));
-  if (const auto* error = std::get_if<PlatformError>(&joined)) {
-    co_return Result::Failure(WifiFailure(*error, NetworkErrorCode::WifiJoinFailed));
+  auto joined = RetainRoute(module, co_await module->Call("join", std::move(arguments)));
+  if (!joined.Succeeded()) co_return Result::Failure(std::move(joined).Error());
+  co_return Result::Success({WifiJoinStatus::Associated, std::move(joined).Value()});
+}
+
+Task<NetworkResult<std::shared_ptr<const WifiNetworkLease>>> SelectPlatformWifiRoute(std::string ssid) {
+  auto module = OpenPlatformModule<std::shared_ptr<WifiModule>>(module_name);
+  auto observed = co_await module->Call("selectRoute", std::move(ssid));
+  co_return RetainRoute(std::move(module), std::move(observed));
+}
+
+Task<NetworkResult<HttpResponse>> SendPlatformWifiHttp(
+    HttpRequest request, std::shared_ptr<const WifiNetworkLease> network) {
+  using Result = NetworkResult<HttpResponse>;
+  const char* method = nullptr;
+  switch (request.method) {
+    case HttpMethod::Get: method = "GET"; break;
+    case HttpMethod::Head: method = "HEAD"; break;
+    case HttpMethod::Post: method = "POST"; break;
+    case HttpMethod::Put: method = "PUT"; break;
+    case HttpMethod::Delete: method = "DELETE"; break;
+    case HttpMethod::Options: method = "OPTIONS"; break;
+    case HttpMethod::Patch: break;
   }
-  module->SetNetwork(static_cast<std::uint64_t>(std::get<PlatformPayload>(joined).AsInteger()));
-  if (!module->AndroidNetwork()) {
-    co_return Result::Failure({NetworkErrorCode::NetworkLost, 0, "The requested Wi-Fi network was lost."});
+  if (!method) co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Unsupported Android HTTP method."});
+  const auto module = std::dynamic_pointer_cast<WifiModule>(WifiNetworkAccess::State(*network));
+  if (!module) co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "This Wi-Fi lease cannot send HTTP."});
+  PlatformPayload::List headers;
+  for (auto& header : request.headers) {
+    headers.emplace_back(PlatformPayload::Object{{"name", std::move(header.name)}, {"value", std::move(header.value)}});
   }
-  co_return Result::Success({WifiJoinStatus::Associated, WifiNetworkAccess::Create(std::move(module))});
+  PlatformPayload arguments = PlatformPayload::Object{
+      {"url", request.url}, {"method", method}, {"headers", std::move(headers)},
+      {"body", std::move(request.body)}, {"timeout", request.timeout->count()}};
+  auto received = co_await module->Call("http", std::move(arguments));
+  if (!network->AndroidNetwork()) {
+    co_return Result::Failure({NetworkErrorCode::NetworkLost, 0, "The selected Wi-Fi network was lost."});
+  }
+  if (const auto* error = std::get_if<PlatformError>(&received)) {
+    co_return Result::Failure(WifiFailure(*error, NetworkErrorCode::ConnectionFailed));
+  }
+  const auto& fields = std::get<PlatformPayload>(received).AsObject();
+  HttpResponse response{.url = std::move(request.url), .status_code = static_cast<int>(fields.at("status").AsInteger())};
+  for (const auto& header : fields.at("headers").AsList()) {
+    const auto& values = header.AsObject();
+    response.headers.push_back({std::string(values.at("name").AsString()), std::string(values.at("value").AsString())});
+  }
+  const auto body = fields.at("body").AsBytes();
+  response.body.assign(body.begin(), body.end());
+  co_return Result::Success(std::move(response));
 }
 
 } // namespace huxerui::localnetwork::detail

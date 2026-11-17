@@ -6,6 +6,7 @@
 /// Include <huxerui/local_network_wifi.h> and link HuxerUI::LocalNetwork. Launch the tasks from a
 /// foreground application TaskScope. The host requests any runtime permissions and provides a
 /// system Wi-Fi settings entry when the platform cannot perform an operation.
+/// On Android, register Install() and use a Wi-Fi lease to bind TCP, paired TLS, or accessory HTTP.
 
 #include <chrono>
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include <huxerui/http.h>
 #include <huxerui/local_network_common.h>
 #include <huxerui/task.h>
 
@@ -73,11 +75,12 @@ class WifiNetworkState;
 struct WifiNetworkAccess;
 }
 
-/// @brief Keeps an app-scoped Android Wi-Fi network request active.
+/// @brief Keeps an Android Wi-Fi route available for bound connections.
 ///
 /// Pass this lease through TcpDialOptions::wifi_network to bind DNS and sockets to that network.
 /// A dial retains the lease for the connection's lifetime. After the system loses the network, obtain a new lease
-/// by joining again. Release all owners of a lease to release its system request.
+/// by joining or selecting the network again. Release all owners to release the system request or observer.
+/// Releasing a lease obtained through SelectWifiRouteAsync() leaves the system Wi-Fi association in place.
 class WifiNetworkLease final {
 public:
   /// A lease is shared through the handle returned by JoinWifiAsync().
@@ -129,5 +132,34 @@ Task<NetworkResult<WifiScanResult>> ScanWifiAsync();
 /// @param request Exact SSID, security, passphrase, and requested configuration lifetime.
 /// @return A lazy task yielding the observed join status and an Android route if applicable, or a NetworkError.
 Task<NetworkResult<WifiJoinResult>> JoinWifiAsync(WifiJoinRequest request);
+
+/// @brief Selects a currently associated Android Wi-Fi network by its exact SSID.
+///
+/// Use after the user joins in system settings. Android 12 or later must expose a unique matching network
+/// with a usable address. The host needs precise Location permission and system Location enabled.
+/// This operation observes the network without changing Wi-Fi association or process routing.
+/// @param ssid Exact UTF-8 name of the accessory network, up to 32 bytes.
+/// @return A lazy task yielding a lease for TCP and paired TLS, or a NetworkError if the route cannot be verified.
+Task<NetworkResult<std::shared_ptr<const WifiNetworkLease>>> SelectWifiRouteAsync(std::string ssid);
+
+/// @brief Activates an existing system Wi-Fi profile, including enterprise profiles.
+///
+/// The system handles the credentials already stored for this profile and may ask the user for approval.
+/// @param profile Windows WLAN profile name in UTF-8, or the UUID of a Linux NetworkManager Wi-Fi profile.
+/// @return A lazy task yielding the observed association status. Other platforms use system Wi-Fi settings.
+Task<NetworkResult<WifiJoinResult>> JoinSavedWifiProfileAsync(std::string profile);
+
+/// @brief Sends one buffered HTTP or HTTPS request over the supplied Android Wi-Fi lease.
+///
+/// DNS and all sockets use the leased network. HTTPS uses Android certificate validation. An HTTP redirect
+/// is returned as a response. The application may validate its target and submit the next request on the same lease.
+/// The request and response bodies are each limited to 1 MiB. The platform adapter supports GET, HEAD, POST,
+/// PUT, DELETE, and OPTIONS. Provide a positive deadline of at most ten minutes. Android app network security
+/// policy applies to cleartext HTTP.
+/// @param request HTTP method, absolute URL, headers, body, and deadline.
+/// @param network Lease returned by JoinWifiAsync() or SelectWifiRouteAsync().
+/// @return A lazy task yielding an HTTP response, including HTTP error statuses, or a NetworkError.
+Task<NetworkResult<HttpResponse>> SendWifiHttpAsync(
+    HttpRequest request, std::shared_ptr<const WifiNetworkLease> network);
 
 } // namespace huxerui::localnetwork

@@ -22,6 +22,7 @@ struct Notification {
   GUID interface_id{};
   std::string ssid;
   std::wstring profile;
+  WLAN_CONNECTION_MODE mode = wlan_connection_mode_temporary_profile;
   HANDLE ready = nullptr;
   std::atomic<DWORD> result = ERROR_GEN_FAILURE;
 
@@ -30,7 +31,7 @@ struct Notification {
     if (note->NotificationSource != WLAN_NOTIFICATION_SOURCE_ACM ||
         !InlineIsEqualGUID(note->InterfaceGuid, self.interface_id)) return;
     auto code = note->NotificationCode;
-    if (self.ssid.empty()) {
+    if (self.profile.empty()) {
       if (code != wlan_notification_acm_scan_complete && code != wlan_notification_acm_scan_fail) return;
       self.result = code == wlan_notification_acm_scan_complete ? ERROR_SUCCESS : ERROR_GEN_FAILURE;
     } else {
@@ -39,8 +40,9 @@ struct Notification {
       if (!note->pData || note->dwDataSize < FIELD_OFFSET(WLAN_CONNECTION_NOTIFICATION_DATA, strProfileXml)) return;
       const auto& response = *static_cast<const WLAN_CONNECTION_NOTIFICATION_DATA*>(note->pData);
       const auto& ssid = response.dot11Ssid;
-      if (response.wlanConnectionMode != wlan_connection_mode_temporary_profile ||
-          self.profile != response.strProfileName || ssid.uSSIDLength > sizeof(ssid.ucSSID) ||
+      if (response.wlanConnectionMode != self.mode || self.profile != response.strProfileName ||
+          ssid.uSSIDLength > sizeof(ssid.ucSSID)) return;
+      if (!self.ssid.empty() &&
           self.ssid != std::string_view(reinterpret_cast<const char*>(ssid.ucSSID), ssid.uSSIDLength)) return;
       self.result = response.wlanReasonCode;
     }
@@ -93,6 +95,29 @@ private:
   HANDLE client_ = nullptr;
   bool registered_ = false;
 };
+
+NetworkResult<void> Connect(WlanClient& client, WLAN_CONNECTION_PARAMETERS parameters) {
+  using Result = NetworkResult<void>;
+  client.note.mode = parameters.wlanConnectionMode;
+  auto status = client.Register();
+  if (status != ERROR_SUCCESS) {
+    return Result::Failure(Failure(NetworkErrorCode::WifiJoinFailed, status, "Could not observe Wi-Fi association."));
+  }
+  status = WlanConnect(client.Handle(), &client.note.interface_id, &parameters, nullptr);
+  if (status != ERROR_SUCCESS) {
+    return Result::Failure(Failure(NetworkErrorCode::WifiJoinFailed, status, "Windows rejected the Wi-Fi connection request."));
+  }
+  const auto ready = WaitForSingleObject(client.note.ready, 25000);
+  if (ready != WAIT_OBJECT_0) {
+    return Result::Failure(Failure(NetworkErrorCode::WifiJoinFailed, ready == WAIT_FAILED ? GetLastError() : ready,
+                                   "Windows did not confirm Wi-Fi association."));
+  }
+  if (client.note.result != WLAN_REASON_CODE_SUCCESS) {
+    return Result::Failure({NetworkErrorCode::WifiJoinFailed, static_cast<int>(client.note.result.load()),
+                            "Windows was unable to associate with the hotspot."});
+  }
+  return Result::Success();
+}
 
 WifiSecurity Security(const WLAN_AVAILABLE_NETWORK& network) {
   if (!network.bSecurityEnabled) return WifiSecurity::Open;
@@ -176,29 +201,13 @@ NetworkResult<WifiJoinResult> Join(WifiJoinRequest request) {
   const auto ssid = HexSsid(request.ssid);
   client.note.ssid = request.ssid;
   client.note.profile = L"HuxerUI-" + std::to_wstring(static_cast<int>(request.security)) + L"-" + ssid;
-  status = client.Register();
-  if (status != ERROR_SUCCESS) {
-    return Result::Failure(Failure(NetworkErrorCode::WifiJoinFailed, status, "Could not observe Wi-Fi association."));
-  }
   const auto xml = Profile(request, client.note.profile, ssid);
-  WLAN_CONNECTION_PARAMETERS parameters{
+  auto connected = Connect(client, WLAN_CONNECTION_PARAMETERS{
       .wlanConnectionMode = wlan_connection_mode_temporary_profile,
       .strProfile = xml.c_str(),
       .dot11BssType = dot11_BSS_type_infrastructure,
-  };
-  status = WlanConnect(client.Handle(), &client.note.interface_id, &parameters, nullptr);
-  if (status != ERROR_SUCCESS) {
-    return Result::Failure(Failure(NetworkErrorCode::WifiJoinFailed, status, "Windows rejected the Wi-Fi connection request."));
-  }
-  const auto ready = WaitForSingleObject(client.note.ready, 25000);
-  if (ready != WAIT_OBJECT_0) {
-    return Result::Failure(Failure(NetworkErrorCode::WifiJoinFailed, ready == WAIT_FAILED ? GetLastError() : ready,
-                                   "Windows did not confirm Wi-Fi association."));
-  }
-  if (client.note.result != WLAN_REASON_CODE_SUCCESS) {
-    return Result::Failure({NetworkErrorCode::WifiJoinFailed, static_cast<int>(client.note.result.load()),
-                            "Windows was unable to associate with the hotspot."});
-  }
+  });
+  if (!connected.Succeeded()) return Result::Failure(std::move(connected).Error());
   if (request.mode == WifiJoinMode::Persistent) {
     DWORD reason = 0;
     status = WlanSetProfile(client.Handle(), &client.note.interface_id, WLAN_PROFILE_USER, xml.c_str(), nullptr,
@@ -210,11 +219,38 @@ NetworkResult<WifiJoinResult> Join(WifiJoinRequest request) {
   return Result::Success({WifiJoinStatus::Associated, {}});
 }
 
+NetworkResult<WifiJoinResult> JoinProfile(std::string profile) {
+  using Result = NetworkResult<WifiJoinResult>;
+  const auto bytes = static_cast<int>(profile.size());
+  const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, profile.data(), bytes, nullptr, 0);
+  if (length <= 0 || length >= WLAN_MAX_NAME_LENGTH) {
+    return Result::Failure({NetworkErrorCode::InvalidWifiConfiguration, 0, "Invalid Windows WLAN profile name."});
+  }
+  std::scoped_lock lock(wlan_operations);
+  WlanClient client;
+  const auto status = client.Open();
+  if (status != ERROR_SUCCESS) {
+    return Result::Failure(Failure(NetworkErrorCode::WifiJoinFailed, status, "Could not open the system Wi-Fi adapter."));
+  }
+  client.note.profile.resize(length);
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, profile.data(), bytes, client.note.profile.data(), length);
+  auto connected = Connect(client, WLAN_CONNECTION_PARAMETERS{
+      .wlanConnectionMode = wlan_connection_mode_profile,
+      .strProfile = client.note.profile.c_str(),
+      .dot11BssType = dot11_BSS_type_infrastructure,
+  });
+  if (!connected.Succeeded()) return Result::Failure(std::move(connected).Error());
+  return Result::Success({WifiJoinStatus::Associated, {}});
+}
+
 } // namespace
 
 Task<NetworkResult<WifiScanResult>> ScanPlatformWifi() { return RunWorker(Scan); }
 Task<NetworkResult<WifiJoinResult>> JoinPlatformWifi(WifiJoinRequest request) {
   return RunWorker(Join, std::move(request));
+}
+Task<NetworkResult<WifiJoinResult>> JoinPlatformWifiProfile(std::string profile) {
+  return RunWorker(JoinProfile, std::move(profile));
 }
 
 } // namespace huxerui::localnetwork::detail

@@ -1,9 +1,11 @@
 package org.huxerui.lib.localnetwork;
 
+import android.Manifest;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.location.LocationManager;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
@@ -28,9 +30,11 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class WifiModule implements HuxerUIPlatformModule.Factory {
     @Override
@@ -44,6 +48,7 @@ public final class WifiModule implements HuxerUIPlatformModule.Factory {
         private final ConnectivityManager connectivity;
         private final HuxerUIPlatformChannel.Events events;
         private final Handler main = new Handler(Looper.getMainLooper());
+        private final Set<WifiHttpRequest> http = new HashSet<>();
         private BroadcastReceiver scan;
         private Runnable timeout;
         private ConnectivityManager.NetworkCallback request;
@@ -67,6 +72,8 @@ public final class WifiModule implements HuxerUIPlatformModule.Factory {
             try {
                 if ("scan".equals(method)) scan(result);
                 else if ("join".equals(method)) join(arguments, result);
+                else if ("selectRoute".equals(method)) selectRoute(arguments.requireString(), result);
+                else if ("http".equals(method)) return sendHttp(arguments, result);
                 else fail(result, "unsupported", "Unknown Wi-Fi operation.");
             } catch (SecurityException denied) {
                 dispose();
@@ -222,6 +229,106 @@ public final class WifiModule implements HuxerUIPlatformModule.Factory {
             return false;
         }
 
+        private void selectRoute(String ssid, HuxerUIPlatformChannel.Result result) {
+            if (Build.VERSION.SDK_INT < 31) {
+                fail(result, "unsupported", "Selecting an already joined Wi-Fi network requires Android 12 or later.");
+                return;
+            }
+            LocationManager location = context.getSystemService(LocationManager.class);
+            if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
+                    location == null || !location.isLocationEnabled()) {
+                fail(result, "permission", "Precise Location access is required to verify the Wi-Fi network name.");
+                return;
+            }
+            Map<Network, RouteCandidate> candidates = new LinkedHashMap<>();
+            request = new ConnectivityManager.NetworkCallback(ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
+                @Override public void onAvailable(Network network) {
+                    if (request == this && !joined) candidates.put(network, new RouteCandidate());
+                }
+
+                @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                    if (request != this) return;
+                    boolean matches = capabilities.getTransportInfo() instanceof WifiInfo &&
+                            ("\"" + ssid + "\"").equals(((WifiInfo) capabilities.getTransportInfo()).getSSID());
+                    RouteCandidate candidate = candidates.get(network);
+                    if (candidate != null) candidate.matches = matches;
+                    if (joined && network.equals(selected) && !matches) loseRoute();
+                }
+
+                @Override public void onLinkPropertiesChanged(Network network, LinkProperties links) {
+                    if (request != this) return;
+                    boolean addressed = links.getInterfaceName() != null && hasAddress(links);
+                    RouteCandidate candidate = candidates.get(network);
+                    if (candidate != null) candidate.addressed = addressed;
+                    if (joined && network.equals(selected) && !addressed) loseRoute();
+                }
+
+                @Override public void onBlockedStatusChanged(Network network, boolean blocked) {
+                    if (request != this) return;
+                    RouteCandidate candidate = candidates.get(network);
+                    if (candidate != null) candidate.unblocked = !blocked;
+                    if (joined && network.equals(selected) && blocked) loseRoute();
+                }
+
+                @Override public void onLost(Network network) {
+                    if (request != this) return;
+                    candidates.remove(network);
+                    if (joined && network.equals(selected)) loseRoute();
+                }
+            };
+            NetworkRequest wifiNetworks = new NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build();
+            // Observe all matching Wi-Fi networks, independent of the app's default route.
+            connectivity.registerNetworkCallback(wifiNetworks, request, main);
+            timeout = () -> {
+                Network match = null;
+                for (Map.Entry<Network, RouteCandidate> entry : candidates.entrySet()) {
+                    RouteCandidate candidate = entry.getValue();
+                    if (!candidate.matches || !candidate.addressed || !candidate.unblocked) continue;
+                    if (match != null) {
+                        dispose();
+                        fail(result, "failed", "More than one usable network has the requested Wi-Fi name.");
+                        return;
+                    }
+                    match = entry.getKey();
+                }
+                if (match == null) {
+                    dispose();
+                    fail(result, "lost", "The requested Wi-Fi network could not be verified.");
+                    return;
+                }
+                candidates.clear();
+                selected = match;
+                joined = true;
+                clearTimeout();
+                result.complete(PlatformPayload.int64(match.getNetworkHandle()));
+            };
+            main.postDelayed(timeout, 2000);
+        }
+
+        private static final class RouteCandidate {
+            boolean matches;
+            boolean addressed;
+            boolean unblocked;
+        }
+
+        private void loseRoute() {
+            dispose();
+            events.emit("lost", PlatformPayload.nullValue());
+        }
+
+        private HuxerUIPlatformChannel.Cancellation sendHttp(PlatformPayload arguments,
+                                                            HuxerUIPlatformChannel.Result result) {
+            if (!joined || selected == null) {
+                fail(result, "lost", "The selected Wi-Fi network was lost.");
+                return null;
+            }
+            WifiHttpRequest task = new WifiHttpRequest(selected, arguments, result, main, http::remove);
+            http.add(task);
+            task.start();
+            return task::cancel;
+        }
+
         private static void fail(HuxerUIPlatformChannel.Result result, String reason, String message) {
             result.fail("localnetwork/wifi-" + reason, message, PlatformPayload.nullValue());
         }
@@ -239,6 +346,7 @@ public final class WifiModule implements HuxerUIPlatformModule.Factory {
 
         @Override public void dispose() {
             stopScan();
+            for (WifiHttpRequest task : new ArrayList<>(http)) task.networkLost();
             ConnectivityManager.NetworkCallback callback = request;
             request = null;
             selected = null;

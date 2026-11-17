@@ -17,6 +17,11 @@ constexpr char device[] = "org.freedesktop.NetworkManager.Device";
 constexpr char wireless[] = "org.freedesktop.NetworkManager.Device.Wireless";
 constexpr char access_point[] = "org.freedesktop.NetworkManager.AccessPoint";
 constexpr char active_connection[] = "org.freedesktop.NetworkManager.Connection.Active";
+constexpr char settings_interface[] = "org.freedesktop.NetworkManager.Settings";
+constexpr char settings_path[] = "/org/freedesktop/NetworkManager/Settings";
+constexpr char profile_interface[] = "org.freedesktop.NetworkManager.Settings.Connection";
+constexpr auto interactive = static_cast<GDBusCallFlags>(
+    G_DBUS_CALL_FLAGS_NO_AUTO_START | G_DBUS_CALL_FLAGS_ALLOW_INTERACTIVE_AUTHORIZATION);
 
 class NetworkManager final {
 public:
@@ -168,6 +173,21 @@ GVariant* Configuration(const WifiJoinRequest& request) {
   return g_variant_builder_end(&settings);
 }
 
+NetworkResult<WifiJoinResult> WaitForActivation(NetworkManager& client, const char* active) {
+  using Result = NetworkResult<WifiJoinResult>;
+  // State 2 confirms that activation completed, including the system's address configuration.
+  const auto deadline = Clock::now() + 25s;
+  do {
+    const auto state = UInt(client.Property(active, active_connection, "State"));
+    if (state == 2) return Result::Success({WifiJoinStatus::Associated, {}});
+    if (state == 0 || state >= 3) {
+      return Result::Failure({NetworkErrorCode::WifiJoinFailed, 0, "NetworkManager could not activate the hotspot."});
+    }
+    std::this_thread::sleep_for(200ms);
+  } while (Clock::now() < deadline);
+  return Result::Failure({NetworkErrorCode::TimedOut, 0, "NetworkManager did not confirm Wi-Fi activation."});
+}
+
 NetworkResult<WifiJoinResult> Join(WifiJoinRequest request) {
   using Result = NetworkResult<WifiJoinResult>;
   NetworkManager client;
@@ -204,24 +224,53 @@ NetworkResult<WifiJoinResult> Join(WifiJoinRequest request) {
       g_variant_new_string(request.mode == WifiJoinMode::Persistent ? "disk" : "volatile"));
   auto reply = client.Call(manager_path, manager, "AddAndActivateConnection2",
       g_variant_new("(@a{sa{sv}}oo@a{sv})", Configuration(request), adapter.c_str(), point.c_str(),
-                    g_variant_builder_end(&options)), 30000,
-      static_cast<GDBusCallFlags>(G_DBUS_CALL_FLAGS_NO_AUTO_START | G_DBUS_CALL_FLAGS_ALLOW_INTERACTIVE_AUTHORIZATION));
+                    g_variant_builder_end(&options)), 30000, interactive);
   if (!reply) {
     return Result::Failure(client.Failure(NetworkErrorCode::WifiJoinFailed, "NetworkManager rejected the Wi-Fi request."));
   }
   const gchar* active = nullptr;
   g_variant_get_child(reply.get(), 1, "&o", &active);
-  // State 2 confirms that activation completed, including the system's address configuration.
-  const auto deadline = Clock::now() + 25s;
-  do {
-    const auto state = UInt(client.Property(active, active_connection, "State"));
-    if (state == 2) return Result::Success({WifiJoinStatus::Associated, {}});
-    if (state == 0 || state >= 3) {
-      return Result::Failure({NetworkErrorCode::WifiJoinFailed, 0, "NetworkManager could not activate the hotspot."});
-    }
-    std::this_thread::sleep_for(200ms);
-  } while (Clock::now() < deadline);
-  return Result::Failure({NetworkErrorCode::TimedOut, 0, "NetworkManager did not confirm Wi-Fi activation."});
+  return WaitForActivation(client, active);
+}
+
+NetworkResult<WifiJoinResult> JoinProfile(std::string uuid) {
+  using Result = NetworkResult<WifiJoinResult>;
+  if (!g_uuid_string_is_valid(uuid.c_str())) {
+    return Result::Failure({NetworkErrorCode::InvalidWifiConfiguration, 0, "Expected a NetworkManager profile UUID."});
+  }
+  NetworkManager client;
+  if (!client.Open()) {
+    return Result::Failure({NetworkErrorCode::Unsupported, 0, "The system NetworkManager bus is unavailable."});
+  }
+  const auto adapter = WifiDevice(client);
+  if (adapter.empty()) {
+    return Result::Failure(client.Failure(NetworkErrorCode::Unsupported, "No managed Wi-Fi adapter is available."));
+  }
+  const auto profile = client.Call(settings_path, settings_interface, "GetConnectionByUuid",
+                                   g_variant_new("(s)", uuid.c_str()));
+  if (!profile) {
+    return Result::Failure(client.Failure(NetworkErrorCode::WifiJoinFailed, "The Wi-Fi profile is unavailable."));
+  }
+  const gchar* path = nullptr;
+  g_variant_get(profile.get(), "(&o)", &path);
+  // GetSettings describes the connection without retrieving its stored secrets.
+  const auto reply = client.Call(path, profile_interface, "GetSettings");
+  if (!reply) return Result::Failure(client.Failure(NetworkErrorCode::WifiJoinFailed, "Could not inspect the Wi-Fi profile."));
+  const Variant settings(g_variant_get_child_value(reply.get(), 0), g_variant_unref);
+  const Variant connection(g_variant_lookup_value(settings.get(), "connection", G_VARIANT_TYPE_VARDICT), g_variant_unref);
+  const gchar* type = nullptr;
+  if (!connection || !g_variant_lookup(connection.get(), "type", "&s", &type) ||
+      std::string_view(type) != "802-11-wireless") {
+    return Result::Failure({NetworkErrorCode::InvalidWifiConfiguration, 0, "The selected profile is not a Wi-Fi profile."});
+  }
+  const auto activated = client.Call(manager_path, manager, "ActivateConnection",
+      g_variant_new("(ooo)", path, adapter.c_str(), "/"), 30000, interactive);
+  if (!activated) {
+    return Result::Failure(client.Failure(NetworkErrorCode::WifiJoinFailed, "NetworkManager rejected the Wi-Fi profile."));
+  }
+  const gchar* active = nullptr;
+  g_variant_get(activated.get(), "(&o)", &active);
+  return WaitForActivation(client, active);
 }
 
 } // namespace
@@ -229,6 +278,9 @@ NetworkResult<WifiJoinResult> Join(WifiJoinRequest request) {
 Task<NetworkResult<WifiScanResult>> ScanPlatformWifi() { return RunWorker(Scan); }
 Task<NetworkResult<WifiJoinResult>> JoinPlatformWifi(WifiJoinRequest request) {
   return RunWorker(Join, std::move(request));
+}
+Task<NetworkResult<WifiJoinResult>> JoinPlatformWifiProfile(std::string profile) {
+  return RunWorker(JoinProfile, std::move(profile));
 }
 
 } // namespace huxerui::localnetwork::detail
