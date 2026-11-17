@@ -22,6 +22,8 @@
   <string>APPL</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Connect to another device to verify the local network connection.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>List nearby Wi-Fi networks and identify the hotspot selected in LocalNetwork Preview.</string>
   <key>NSBonjourServices</key>
   <array>
     <string>_huxer-lan._tcp</string>

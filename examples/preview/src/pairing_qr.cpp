@@ -1,3 +1,7 @@
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #if defined(HUXERUI_LOCALNETWORK_PREVIEW_QR) && defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -168,7 +172,7 @@ Task<IoResult<ScannedInvitation>> ReadInvitationQr(File image) {
 #endif
 }
 
-#if !defined(HUXERUI_LOCALNETWORK_PREVIEW_IOS_CAMERA)
+#if !(defined(__APPLE__) && TARGET_OS_IOS)
 #ifdef __ANDROID__
 void InstallQrCamera(ApplicationContext& context) {
   android::JavaWindowPlatformModuleFactory<std::shared_ptr<QrCamera>> factory;
