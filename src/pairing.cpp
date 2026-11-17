@@ -532,6 +532,17 @@ private:
   std::shared_ptr<TlsSocket> socket_;
 };
 
+NetworkResult<std::string> MakeBridgeGrant() {
+  std::array<std::uint8_t, 32> entropy{};
+  if (const auto error = Random(nullptr, entropy.data(), entropy.size()); error != 0) {
+    return NetworkResult<std::string>::Failure(
+        CryptoError(NetworkErrorCode::Authentication, error, "Could not generate a WSS grant."));
+  }
+  auto grant = Hex(entropy);
+  mbedtls_platform_zeroize(entropy.data(), entropy.size());
+  return NetworkResult<std::string>::Success(std::move(grant));
+}
+
 NetworkResult<BridgeCredentials> LoadBridgeCredentials(std::string certificate_pem, std::string private_key_pem) {
   const auto clear_key = [&] { mbedtls_platform_zeroize(private_key_pem.data(), private_key_pem.size()); };
   const auto fail = [](int code) {
@@ -555,19 +566,20 @@ NetworkResult<BridgeCredentials> LoadBridgeCredentials(std::string certificate_p
   if (error == 0) error = mbedtls_pk_check_pair(&identity->certificate.pk, &identity->key, Random, nullptr);
   if (error != 0) return fail(error);
 
-  std::array<std::uint8_t, 32> entropy{};
-  if (const auto random_error = Random(nullptr, entropy.data(), entropy.size()); random_error != 0) {
-    return fail(random_error);
-  }
-  auto grant = Hex(entropy);
-  mbedtls_platform_zeroize(entropy.data(), entropy.size());
-  return NetworkResult<BridgeCredentials>::Success({std::move(identity), std::move(grant)});
+  auto grant = MakeBridgeGrant();
+  if (!grant.Succeeded()) return NetworkResult<BridgeCredentials>::Failure(grant.Error());
+  return NetworkResult<BridgeCredentials>::Success({std::move(identity), std::move(grant).Value()});
 }
 
 } // namespace
 
 Task<NetworkResult<BridgeCredentials>> PrepareBridgeCredentials(std::string certificate_pem, std::string private_key_pem) {
   return RunWorker(LoadBridgeCredentials, std::move(certificate_pem), std::move(private_key_pem));
+}
+
+NetworkResult<std::string> GenerateBridgeGrant() {
+  std::scoped_lock lock(CryptoMutex());
+  return MakeBridgeGrant();
 }
 
 Task<NetworkResult<std::shared_ptr<SocketIo>>> AcceptBridgeTls(

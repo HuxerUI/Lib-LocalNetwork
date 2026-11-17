@@ -434,6 +434,18 @@ std::shared_ptr<detail::SocketIo> detail::TcpConnectionAccess::TakeSocket(
 }
 
 #ifndef __EMSCRIPTEN__
+bool detail::TcpConnectionAccess::IsConcreteAddress(const std::string& host) {
+  if (!detail::ValidHost(host)) return false;
+  auto result = detail::Resolve({host, 0}, {}, true);
+  if (!result.Succeeded() || !result.Value()) return false;
+  const auto& address = *result.Value();
+  if (address.ai_family == AF_INET)
+    return reinterpret_cast<const sockaddr_in*>(address.ai_addr)->sin_addr.s_addr != INADDR_ANY;
+  if (address.ai_family != AF_INET6) return false;
+  const auto& ip = reinterpret_cast<const sockaddr_in6*>(address.ai_addr)->sin6_addr;
+  return !IN6_IS_ADDR_UNSPECIFIED(&ip) && !IN6_IS_ADDR_V4MAPPED(&ip);
+}
+
 TcpConnection::TcpConnection(std::shared_ptr<detail::TcpSocket> socket, ConnectionPath path)
     : socket_(std::move(socket)), path_(std::move(path)),
       input_(AsyncInputStream::FromReader([socket = socket_](std::stop_token stop, std::size_t maximum_bytes) {

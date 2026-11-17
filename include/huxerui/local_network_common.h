@@ -30,12 +30,12 @@ enum class NetworkErrorCode {
   Unsupported,      ///< The requested operation or routing constraint is unavailable on this platform.
   ResolveFailed,    ///< The requested host could not be resolved.
   NetworkLost,      ///< A required network is no longer available for binding.
-  PermissionDenied, ///< The system denied the network operation.
+  PermissionDenied, ///< The system or the host's bridge policy denied the operation.
   AddressInUse,     ///< The requested local address and port are in use.
   ConnectionFailed, ///< The socket operation failed before establishing a connection.
   TimedOut,         ///< The operation did not complete by its deadline.
   Closed,           ///< The listener or connection has been closed.
-  Busy,             ///< The listener already has a pending accept or an active relay.
+  Busy,             ///< Another operation is pending or the session reached a resource limit.
   InvalidIdentity,  ///< A device credential is invalid or could not be created.
   Authentication,   ///< TLS or peer authentication failed.
   PairingRejected,  ///< A pairing invitation or request was rejected.

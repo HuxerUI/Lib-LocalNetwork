@@ -1,11 +1,12 @@
 #include "bridge_backend.h"
 
 #ifdef HUXERUI_LOCALNETWORK_WSLAY
-#include "bridge_tls.h"
+#include "bridge_host_backend.h"
 
 #include <algorithm>
 #include <array>
 #include <map>
+#include <utility>
 
 #include <mbedtls/base64.h>
 #include <mbedtls/sha1.h>
@@ -20,32 +21,28 @@ using ssize_t = SSIZE_T;
 namespace huxerui::localnetwork {
 namespace detail {
 
+#ifdef HUXERUI_LOCALNETWORK_WSLAY
+void WebBridgeListenerState::Close() noexcept {
+  if (std::exchange(closed, true)) return;
+  grant.clear();
+  listener.Close();
+  if (active_socket) active_socket->Close();
+  if (active_peer) active_peer->Close();
+  if (stop_control) stop_control();
+}
+#else
 struct WebBridgeListenerState {
   Endpoint endpoint;
   std::string grant;
-#ifdef HUXERUI_LOCALNETWORK_WSLAY
-  std::string origin;
-  TcpListener listener;
-  std::shared_ptr<IdentityState> certificate;
-  std::shared_ptr<SocketIo> active_socket;
-  std::shared_ptr<PairedConnection> active_peer;
-  bool closed = false;
-
-  void Close() noexcept {
-    closed = true;
-    grant.clear();
-    listener.Close();
-    if (active_socket) active_socket->Close();
-    if (active_peer) active_peer->Close();
-  }
-#endif
 };
+#endif
 
 #ifdef HUXERUI_LOCALNETWORK_WSLAY
 namespace {
 
 using namespace std::chrono_literals;
 constexpr auto retry_interval = 4ms;
+constexpr auto close_timeout = 2s;
 constexpr std::size_t max_header_bytes = 8192;
 
 char LowerAscii(char ch) {
@@ -154,7 +151,7 @@ Task<bool> Upgrade(SocketIo& socket, std::string_view origin, BridgeClock::time_
   co_return false;
 }
 
-class HostWebSocket final : public BridgeTransport {
+class HostWebSocket final : public HostBridgeTransport {
 public:
   explicit HostWebSocket(std::shared_ptr<SocketIo> socket) : socket_(std::move(socket)) {
     const wslay_event_callbacks callbacks{Receive, Send, nullptr, nullptr, nullptr, nullptr, OnMessage};
@@ -189,8 +186,8 @@ public:
     return IoResult<bool>::Failure({IoErrorCode::Io, "Could not queue a WSS message."});
   }
 
-  Task<bool> Finish() {
-    const auto deadline = BridgeClock::now() + 2s;
+  Task<bool> Finish() override {
+    const auto deadline = BridgeClock::now() + close_timeout;
     while (!failed_ && wslay_event_want_write(context_) && BridgeClock::now() < deadline) {
       if (wslay_event_send(context_) != 0) co_return false;
       if (wslay_event_want_write(context_)) co_await Delay(retry_interval);
@@ -261,18 +258,17 @@ private:
   bool failed_ = false;
 };
 
-Task<std::shared_ptr<HostWebSocket>> WaitForBrowser(std::shared_ptr<WebBridgeListenerState> state) {
+Task<std::shared_ptr<HostBridgeTransport>> WaitForBrowser(std::shared_ptr<WebBridgeListenerState> state) {
   while (!state->closed) {
     auto accepted = co_await state->listener.AcceptAsync();
     if (!accepted.Succeeded() || state->closed) co_return nullptr;
     state->active_socket = TcpConnectionAccess::TakeSocket(accepted.Value());
     const auto deadline = BridgeClock::now() + 10s;
-    auto tls = co_await AcceptBridgeTls(state->active_socket, state->certificate, deadline);
-    if (!tls.Succeeded() || !co_await Upgrade(*tls.Value(), state->origin, deadline)) {
+    auto wire = co_await AcceptBridgeWebSocket(state->active_socket, state->certificate, state->origin, deadline);
+    if (!wire) {
       state->active_socket.reset();
       continue;
     }
-    auto wire = std::make_shared<HostWebSocket>(std::move(tls).Value());
     auto received = co_await ReadBridgePacket(*wire, deadline);
     if (received.Succeeded() && !state->closed) {
       const auto& packet = received.Value();
@@ -294,38 +290,57 @@ Task<IoResult<void>> Forward(AsyncInputStream& input, AsyncOutputStream& output)
   co_return co_await output.CloseAsync();
 }
 
-Task<void> ForwardToPeer(std::shared_ptr<HostWebSocket> wire, std::shared_ptr<WebBridgeConnection> browser,
-                         std::shared_ptr<PairedConnection> peer,
+Task<void> ForwardToPeer(std::shared_ptr<WebBridgeConnection> browser, std::shared_ptr<PairedConnection> peer,
                          std::shared_ptr<std::optional<IoResult<void>>> result) {
   result->emplace(co_await Forward(browser->Input(), peer->Output()));
   if (!result->value().Succeeded()) {
     browser->Close();
-  } else {
-    // A browser can abandon the session after ending its output while the native peer is still idle.
-    while (wire->Poll()) co_await Delay(retry_interval);
+    peer->Close();
   }
+}
+
+Task<void> WatchRelay(std::shared_ptr<HostBridgeTransport> wire, std::shared_ptr<PairedConnection> peer) {
+  // Both pumps can be waiting on the paired socket. Observe WSS even while the peer is applying backpressure.
+  while (wire->Poll()) co_await Delay(retry_interval);
+  // Give the inbound pump time to forward any final bytes and End already read from WSS.
+  co_await Delay(close_timeout);
   peer->Close();
 }
 
 Task<NetworkResult<void>> Relay(std::shared_ptr<WebBridgeListenerState> state, PairedConnection peer, TaskScope tasks) {
   using Result = NetworkResult<void>;
   if (!state || state->closed) co_return Result::Failure({NetworkErrorCode::Closed, 0, "The WSS listener is closed."});
-  if (state->active_peer) co_return Result::Failure({NetworkErrorCode::Busy, 0, "A WSS relay is already running."});
+  if (state->active_peer || state->stop_control)
+    co_return Result::Failure({NetworkErrorCode::Busy, 0, "A WSS session is already running."});
   state->active_peer = std::make_shared<PairedConnection>(std::move(peer));
   struct RelayGuard {
     std::shared_ptr<WebBridgeListenerState> state;
-    TaskHandle inbound;
     ~RelayGuard() {
-      inbound.Cancel();
       state->Close();
       state->active_peer.reset();
       state->active_socket.reset();
     }
-  } relay{state, {}};
+  } relay{state};
 
   auto wire = co_await WaitForBrowser(state);
   if (!wire) co_return Result::Failure({NetworkErrorCode::Closed, 0, "The WSS listener stopped accepting browsers."});
-  const auto& id = state->active_peer->Peer();
+  co_return co_await RelayBridgeConnection(std::move(wire), state->active_peer, std::move(tasks));
+}
+
+} // namespace
+
+Task<std::shared_ptr<HostBridgeTransport>> AcceptBridgeWebSocket(
+    std::shared_ptr<SocketIo> socket, std::shared_ptr<IdentityState> certificate, std::string_view origin,
+    BridgeClock::time_point deadline) {
+  auto tls = co_await AcceptBridgeTls(std::move(socket), std::move(certificate), deadline);
+  if (!tls.Succeeded() || !co_await Upgrade(*tls.Value(), origin, deadline)) co_return nullptr;
+  co_return std::make_shared<HostWebSocket>(std::move(tls).Value());
+}
+
+Task<NetworkResult<void>> RelayBridgeConnection(std::shared_ptr<HostBridgeTransport> wire,
+                                               std::shared_ptr<PairedConnection> peer, TaskScope tasks) {
+  using Result = NetworkResult<void>;
+  const auto& id = peer->Peer();
   const auto deadline = BridgeClock::now() + 10s;
   auto ready = co_await SendBridgePacket(*wire, MakeBridgePacket(BridgePacket::Ready, std::as_bytes(std::span(id.digest))),
                                         deadline);
@@ -336,20 +351,31 @@ Task<NetworkResult<void>> Relay(std::shared_ptr<WebBridgeListenerState> state, P
   // Both stream pumps run independently so a write cannot block the return path or its flow-control credits.
   auto browser = std::make_shared<WebBridgeConnection>(std::move(opened).Value());
   auto inbound = std::make_shared<std::optional<IoResult<void>>>();
-  relay.inbound = tasks.Launch(ForwardToPeer(wire, browser, state->active_peer, inbound));
-  auto outbound = co_await Forward(state->active_peer->Input(), browser->Output());
-  while (outbound.Succeeded() && !inbound->has_value() && !state->closed) co_await Delay(retry_interval);
+  struct RelayTasks {
+    PairedConnection& peer;
+    TaskHandle inbound;
+    TaskHandle watch;
+    ~RelayTasks() {
+      watch.Cancel();
+      inbound.Cancel();
+      peer.Close();
+    }
+  } relay{*peer, {}, {}};
+  relay.inbound = tasks.Launch(ForwardToPeer(browser, peer, inbound));
+  relay.watch = tasks.Launch(WatchRelay(wire, peer));
+  auto outbound = co_await Forward(peer->Input(), browser->Output());
+  // The inbound task may still have a final End packet to forward after the browser closes its socket.
+  while (outbound.Succeeded() && !inbound->has_value()) co_await Delay(retry_interval);
   if (inbound->has_value() && !inbound->value().Succeeded()) {
     co_return Result::Failure({NetworkErrorCode::ConnectionFailed, 0, inbound->value().Error().message});
   }
   if (!outbound.Succeeded()) co_return Result::Failure({NetworkErrorCode::ConnectionFailed, 0, outbound.Error().message});
-  if (state->closed || !co_await wire->Finish()) {
+  if (!co_await wire->Finish()) {
     co_return Result::Failure({NetworkErrorCode::Closed, 0, "The WSS relay closed before completing."});
   }
   co_return Result::Success();
 }
 
-} // namespace
 #endif
 } // namespace detail
 
@@ -383,6 +409,14 @@ Task<NetworkResult<void>> WebBridgeListener::RelayAsync(PairedConnection peer, T
 #endif
 }
 
+Task<NetworkResult<void>> WebBridgeListener::ServeAsync(WebBridgePolicy policy, TaskScope tasks) {
+#ifdef HUXERUI_LOCALNETWORK_WSLAY
+  return detail::ServeBridgeControl(state_, std::move(policy), std::move(tasks));
+#else
+  co_return NetworkResult<void>::Failure({NetworkErrorCode::Unsupported, 0, "A desktop WSS bridge is unavailable."});
+#endif
+}
+
 Task<NetworkResult<WebBridgeListener>> ListenWebBridgeAsync(WebBridgeListenOptions options) {
   using Result = NetworkResult<WebBridgeListener>;
 #ifdef HUXERUI_LOCALNETWORK_WSLAY
@@ -397,7 +431,8 @@ Task<NetworkResult<WebBridgeListener>> ListenWebBridgeAsync(WebBridgeListenOptio
   auto endpoint = listening.Value().LocalEndpoint();
   co_return Result::Success(WebBridgeListener(std::make_shared<detail::WebBridgeListenerState>(
       detail::WebBridgeListenerState{std::move(endpoint), std::move(credentials.Value().grant), std::move(options.origin),
-                                    std::move(listening).Value(), std::move(credentials.Value().certificate), {}, {}})));
+                                    std::move(listening).Value(), std::move(credentials.Value().certificate),
+                                    {}, {}, {}})));
 #else
   co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "A desktop WSS bridge is unavailable."});
 #endif

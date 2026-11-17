@@ -22,6 +22,8 @@ public:
 struct TcpConnectionAccess {
   /// Transfers socket ownership to the TLS transport. The connection's byte streams must still be unused.
   static std::shared_ptr<SocketIo> TakeSocket(TcpConnection& connection);
+  /// Checks for a numeric, non-wildcard address without performing DNS.
+  static bool IsConcreteAddress(const std::string& host);
 };
 
 } // namespace huxerui::localnetwork::detail

@@ -1,4 +1,4 @@
-#include "../../../src/bridge_backend.h"
+#include "../../../src/bridge_control_protocol.h"
 
 #include <algorithm>
 #include <utility>
@@ -101,18 +101,17 @@ private:
 
 } // namespace
 
-Task<NetworkResult<WebBridgeConnection>> ConnectBrowserBridge(WebBridgeDialOptions options) {
-  using Result = NetworkResult<WebBridgeConnection>;
-  if (options.url.find_first_of("?#@") != std::string::npos || options.url.find('\0') != std::string::npos ||
-      !options.url.starts_with("wss://") || !ValidBrowserBridgeUrl(options.url.c_str(), bridge_path) ||
-      !ValidBridgeGrant(options.grant)) {
-    co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "A valid WSS URL and one-time grant are required."});
+Task<NetworkResult<std::shared_ptr<BridgeTransport>>> OpenBrowserBridge(std::string url) {
+  using Result = NetworkResult<std::shared_ptr<BridgeTransport>>;
+  if (url.find_first_of("?#@") != std::string::npos || url.find('\0') != std::string::npos ||
+      !url.starts_with("wss://") || !ValidBrowserBridgeUrl(url.c_str(), bridge_path)) {
+    co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "A valid WSS URL is required."});
   }
   auto socket = std::make_shared<BrowserWebSocket>();
   if (!emscripten_websocket_is_supported()) {
     co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "The browser does not support WebSocket."});
   }
-  if (!socket->Start(options.url)) {
+  if (!socket->Start(url)) {
     co_return Result::Failure({NetworkErrorCode::ConnectionFailed, 0, "Could not start the browser WSS connection."});
   }
 
@@ -123,14 +122,33 @@ Task<NetworkResult<WebBridgeConnection>> ConnectBrowserBridge(WebBridgeDialOptio
     }
     co_await Delay(4ms);
   }
+  if (!socket->Open())
+    co_return Result::Failure({NetworkErrorCode::ConnectionFailed, 0, "The browser WSS connection was closed."});
+  co_return Result::Success(std::move(socket));
+}
+
+namespace {
+
+Task<NetworkResult<WebBridgeConnection>> ConnectData(WebBridgeDialOptions options, bool managed) {
+  using Result = NetworkResult<WebBridgeConnection>;
+  if (!ValidBridgeGrant(options.grant)) {
+    co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "A valid one-time WSS grant is required."});
+  }
+  auto opened = co_await OpenBrowserBridge(std::move(options.url));
+  if (!opened.Succeeded()) co_return Result::Failure(opened.Error());
+  auto socket = std::move(opened).Value();
+  const auto deadline = BridgeClock::now() + 15s;
   auto authenticated = co_await SendBridgePacket(
       *socket, MakeBridgePacket(BridgePacket::Authenticate, std::as_bytes(std::span(options.grant))), deadline);
   if (!authenticated.Succeeded()) co_return Result::Failure(authenticated.Error());
-  auto ready = co_await ReadBridgePacket(*socket, deadline);
+  // A registered listener can wait for an incoming peer after the browser has opened its data socket.
+  auto ready = co_await ReadBridgePacket(*socket, managed ? BridgeClock::time_point::max() : deadline);
   if (!ready.Succeeded()) co_return Result::Failure(ready.Error());
 
   PeerId peer;
   const auto& packet = ready.Value();
+  if (managed && packet.front() == static_cast<std::byte>(BridgePacket::Failure))
+    co_return Result::Failure(ReadBridgeFailure(std::span(packet).subspan(1)));
   if (packet.size() != peer.digest.size() + 1 || packet.front() != static_cast<std::byte>(BridgePacket::Ready)) {
     co_return Result::Failure({NetworkErrorCode::Protocol, 0, "The WSS bridge sent an invalid peer identity."});
   }
@@ -138,7 +156,17 @@ Task<NetworkResult<WebBridgeConnection>> ConnectBrowserBridge(WebBridgeDialOptio
   if (options.expected_peer && *options.expected_peer != peer) {
     co_return Result::Failure({NetworkErrorCode::Authentication, 0, "The WSS bridge reported an unexpected peer."});
   }
-  co_return co_await BridgeAccess::Open(std::move(socket), peer, deadline);
+  co_return co_await BridgeAccess::Open(std::move(socket), peer, BridgeClock::now() + 15s);
+}
+
+} // namespace
+
+Task<NetworkResult<WebBridgeConnection>> ConnectBrowserBridge(WebBridgeDialOptions options) {
+  return ConnectData(std::move(options), false);
+}
+
+Task<NetworkResult<WebBridgeConnection>> ConnectBrowserData(WebBridgeDialOptions options) {
+  return ConnectData(std::move(options), true);
 }
 
 } // namespace huxerui::localnetwork::detail

@@ -12,8 +12,11 @@ inline constexpr char bridge_protocol[] = "huxer-lan.v1";
 inline constexpr std::size_t bridge_chunk = 32 * 1024;
 inline constexpr std::size_t bridge_grant_size = 64;
 
-// Version 1 sends a single tag followed by the grant, peer digest, or data. Credit and End carry only the tag.
-enum class BridgePacket : std::uint8_t { Authenticate = 1, Ready = 2, Credit = 3, Data = 4, End = 5 };
+// The first five tags form the paired data protocol. Control requests use the remaining tags on separate sockets.
+enum class BridgePacket : std::uint8_t {
+  Authenticate = 1, Ready = 2, Credit = 3, Data = 4, End = 5,
+  ControlAuthenticate = 6, ControlReady = 7, Request = 8, Response = 9, Failure = 10
+};
 
 /// Owns the WebSocket transport and its small, bounded queue of incoming messages.
 class BridgeTransport {
@@ -49,7 +52,9 @@ struct BridgeAccess {
 };
 
 #ifdef __EMSCRIPTEN__
+Task<NetworkResult<std::shared_ptr<BridgeTransport>>> OpenBrowserBridge(std::string url);
 Task<NetworkResult<WebBridgeConnection>> ConnectBrowserBridge(WebBridgeDialOptions options);
+Task<NetworkResult<WebBridgeConnection>> ConnectBrowserData(WebBridgeDialOptions options);
 #endif
 
 } // namespace huxerui::localnetwork::detail

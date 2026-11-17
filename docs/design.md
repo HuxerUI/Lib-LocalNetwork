@@ -131,9 +131,30 @@ downstream `PeerId`. Use `Input()` and `Output()` with the application's existin
 pairing. It authenticates the native peer on the page's behalf and can inspect relayed bytes. The grant is sent
 inside WSS and consumed once. Keep it out of URLs, logs, and persistence.
 
-Windows, macOS, and Linux builds can host one paired session per listener. Set
-`HUXERUI_LOCALNETWORK_BUILD_WEB_BRIDGE=OFF` to omit the desktop listener. Browser-directed DNS-SD and dialing,
-service registration, and serving the Web application belong to the broader bridge design above.
+This path hands one existing connection to the browser through `RelayAsync()`.
+
+### Scoped browser control
+
+Use `ServeAsync()` with a `WebBridgePolicy` after the desktop user approves a page. Provide the approved DNS-SD
+types and optional interface, the exact numeric address and public-key combinations the page may dial, and the
+local address and incoming pairing policy for any registered listeners. Publication can use only approved types
+and the actual endpoint of a listener owned by the page. The desktop application supplies its existing pairing
+identity, approves incoming invitations, and shares any invitation code through its own UI.
+
+On Web, redeem the one-time control grant through `ConnectWebBridgeControlAsync()`. Browse an approved type,
+resolve an entry from its latest snapshot, and dial an approved endpoint and peer. To receive a connection,
+register a listener, publish its endpoint when discovery is needed, and await `AcceptAsync()`. Withdraw a
+publication independently or close its listener to stop new accepts. Closing a listener leaves established
+sessions available while the control connection remains open.
+
+The control socket handles one request at a time. Each dial or accept redeems a separate short-lived grant on
+another WSS socket and exposes the same asynchronous byte streams as the paired-session bridge. An accept waiting
+for a peer leaves the control connection available. Losing the control connection ends the registered listeners,
+publications, pending grants, and data connections. The desktop app can close its WSS listener to revoke the
+entire control session.
+
+Windows, macOS, and Linux builds can host the bridge. Set `HUXERUI_LOCALNETWORK_BUILD_WEB_BRIDGE=OFF` to omit the
+desktop listener. The host application supplies page hosting and certificate provisioning.
 
 ## Physical device acceptance
 
