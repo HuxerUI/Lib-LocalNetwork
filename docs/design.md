@@ -61,8 +61,8 @@ public:
 
   Task<NetResult<Listener>> ListenAsync(ListenOptions options);
   Task<NetResult<Connection>> ConnectAsync(
-      Target target, PeerCredential credential, ConnectOptions options);
-  Task<NetResult<Connection>> DialAsync(Endpoint endpoint, DialOptions options);
+      Target target, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options);
+  Task<NetResult<Connection>> DialAsync(Target target, DialOptions options);
 };
 
 } // namespace huxerui::localnetwork
@@ -80,6 +80,22 @@ Adapt platform I/O through HuxerUI's `AsyncInputStream::FromReader` and `AsyncOu
 `output.CloseAsync()` finalizes local output and releases the output stream. `ShutdownWriteAsync()` explicitly signals end of output to the peer while allowing further reads. Advertise that capability only on backends that have verified their orderly half-close behavior. `Connection::CloseAsync()` closes the full connection and settles pending I/O. A premature disconnection or truncated application payload is an error. File transfer uses its own length and receipt acknowledgement, so the base transport needs no custom end-of-stream frame. [TLS closure alerts](https://www.rfc-editor.org/rfc/rfc8446.html#section-6.1)
 
 The installed HuxerUI SDK 0.4.0 headers lack the public callback-backed stream factories. Implementation requires a matching SDK that exposes both factories. Lib-PluginKit already uses that contract. [HuxerUI stream API](https://github.com/HuxerUI/HuxerUI/blob/main/include/huxerui/stream.h) · [Lib-PluginKit stream adapter](https://github.com/HuxerUI/Lib-PluginKit/blob/main/include/huxerui/pluginkit/detail/streams.h)
+
+### Unified outbound connections
+
+The library exposes free functions `ConnectAsync()` and `DialAsync()`. Both accept an `Endpoint` or a
+`DiscoveredService`. `ConnectAsync()` uses a local device identity and a remembered key or pairing code.
+`DialAsync()` defaults to platform-trusted TLS. Select `DialMode::Tcp` for a plain TCP accessory.
+
+For TLS over DNS-SD, supply the expected certificate name through `DialOptions::server_name`. Obtain it from the
+user or application configuration. Discovery supplies the candidate addresses. The dial keeps their scope,
+checks any Android network constraint, and tries other addresses after connection failures or timeouts. An
+authentication or pairing error ends the operation. The TCP timeout applies to each resolved endpoint.
+
+The owning `Connection` exposes the existing input and output streams, the actual TCP endpoints, the security
+mode, and the authenticated peer identifier for paired TLS. `ShutdownWriteAsync()` finishes the output stream
+while input stays available. `CloseAsync()` closes both directions when the task runs. Existing applications
+can use the original connection types or transfer them into a `Connection`. [Unified connection API](../include/huxerui/local_network_connection.h)
 
 ### Accessory TLS client
 

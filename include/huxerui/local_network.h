@@ -8,6 +8,7 @@
 
 #include <huxerui/local_network_bridge.h>
 #include <huxerui/local_network_common.h>
+#include <huxerui/local_network_connection.h>
 #include <huxerui/local_network_discovery.h>
 #include <huxerui/local_network_pairing.h>
 #include <huxerui/local_network_tcp.h>
