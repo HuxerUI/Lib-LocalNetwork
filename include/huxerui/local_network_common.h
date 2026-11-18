@@ -52,7 +52,7 @@ struct NetworkError {
   /// Stable category for application decisions.
   NetworkErrorCode code;
   /// Operation-specific diagnostic number from the system or TLS library, or zero when unavailable.
-  int system_code = 0;
+  int diagnostic_code = 0;
   /// Human-readable context. Applications should use code for decisions.
   std::string message;
 };

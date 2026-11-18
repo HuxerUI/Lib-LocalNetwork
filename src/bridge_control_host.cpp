@@ -105,8 +105,8 @@ struct HostSession {
 };
 
 bool SameService(const DiscoveredService& left, const DiscoveredService& right) {
-  return left.name == right.name && left.type == right.type && left.instance == right.instance &&
-         left.scope == right.scope;
+  return left.display_name == right.display_name && left.type == right.type &&
+      left.instance_id == right.instance_id && left.scope == right.scope;
 }
 
 Task<Bytes> Browse(HostSession& host, ControlReader& request) {

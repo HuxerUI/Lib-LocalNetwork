@@ -24,9 +24,9 @@ void ControlWriter::Write(const PeerId& value) {
 }
 
 void ControlWriter::Write(const DiscoveredService& value) {
-  Write(value.name);
+  Write(value.display_name);
   Write(value.type);
-  Write(value.instance);
+  Write(value.instance_id);
   Write(value.scope);
 }
 
@@ -85,7 +85,7 @@ NetworkError BridgeProtocolError() { return {NetworkErrorCode::Protocol, 0, "Inv
 Bytes BridgeFailure(const NetworkError& error) {
   ControlWriter reply(BridgePacket::Failure);
   reply.Write(static_cast<std::uint32_t>(error.code));
-  reply.Write(static_cast<std::uint32_t>(error.system_code));
+  reply.Write(static_cast<std::uint32_t>(error.diagnostic_code));
   reply.Write(std::string_view(error.message).substr(0, 512));
   return std::move(reply).Take();
 }

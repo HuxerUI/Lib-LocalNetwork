@@ -21,30 +21,30 @@ Task<NetworkResult<Connection>> InvalidDial(std::string message) {
 
 Task<NetworkResult<std::vector<Endpoint>>> ResolveTarget(DiscoveredService service, TcpDialOptions& options) {
   using Result = NetworkResult<std::vector<Endpoint>>;
-  if (options.android_network == 0 || (options.android_network && options.wifi_network) ||
+  if (options.android_network_handle == 0 || (options.android_network_handle && options.wifi_lease) ||
       options.timeout <= std::chrono::milliseconds::zero()) {
     co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "Invalid TCP dial options."});
   }
 #ifndef __ANDROID__
-  if (options.android_network || options.wifi_network) {
+  if (options.android_network_handle || options.wifi_lease) {
     co_return Result::Failure(
         {NetworkErrorCode::Unsupported, 0, "Android network binding is unavailable on this platform."});
   }
 #endif
-  const auto selected = options.wifi_network ? options.wifi_network->AndroidNetwork() : options.android_network;
-  if (options.wifi_network && !selected) co_return Result::Failure(LostRoute());
+  const auto selected = options.wifi_lease ? options.wifi_lease->AndroidNetwork() : options.android_network_handle;
+  if (options.wifi_lease && !selected) co_return Result::Failure(LostRoute());
 
   const auto scope = service.scope;
   // Android reports an actual Network handle as the service scope. An explicit route requires that scope.
   if (selected && scope != *selected) co_return Result::Failure(WrongServiceNetwork());
   auto resolved = co_await ResolveServiceAsync(std::move(service));
-  if (options.wifi_network && !options.wifi_network->AndroidNetwork()) co_return Result::Failure(LostRoute());
+  if (options.wifi_lease && !options.wifi_lease->AndroidNetwork()) co_return Result::Failure(LostRoute());
   if (!resolved.Succeeded()) co_return Result::Failure(resolved.Error());
 
-  const auto network = resolved.Value().android_network;
+  const auto network = resolved.Value().android_network_handle;
   if ((selected && selected != network) || (network && scope != 0 && scope != *network))
     co_return Result::Failure(WrongServiceNetwork());
-  if (!selected) options.android_network = network;
+  if (!selected) options.android_network_handle = network;
   if (resolved.Value().endpoints.empty())
     co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "The DNS-SD service has no usable endpoints."});
   co_return Result::Success(std::move(resolved).Value().endpoints);
@@ -67,7 +67,7 @@ Task<NetworkResult<Connection>> DialTarget(Target target, TcpDialOptions options
   NetworkError failure{NetworkErrorCode::ConnectionFailed, 0, "No connection could be established."};
   for (const auto& endpoint : endpoints) {
     auto connected = co_await dial(endpoint, options);
-    if (options.wifi_network && !options.wifi_network->AndroidNetwork()) co_return Result::Failure(LostRoute());
+    if (options.wifi_lease && !options.wifi_lease->AndroidNetwork()) co_return Result::Failure(LostRoute());
     if (connected.Succeeded()) co_return Result::Success(Connection(std::move(connected).Value()));
     failure = std::move(connected).Error();
     // Try other addresses for reachability failures. Authentication and route failures end the operation.

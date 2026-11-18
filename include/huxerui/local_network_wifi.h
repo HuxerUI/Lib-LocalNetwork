@@ -77,7 +77,7 @@ struct WifiNetworkAccess;
 
 /// @brief Keeps an Android Wi-Fi route available for bound connections.
 ///
-/// Pass this lease through TcpDialOptions::wifi_network to bind DNS and sockets to that network.
+/// Pass this lease through TcpDialOptions::wifi_lease to bind DNS and sockets to that network.
 /// A dial retains the lease for the connection's lifetime. After the system loses the network, obtain a new lease
 /// by joining or selecting the network again. Release all owners to release the system request or observer.
 /// Releasing a lease obtained through SelectWifiRouteAsync() leaves the system Wi-Fi association in place.
@@ -102,7 +102,7 @@ struct WifiJoinResult {
   /// Whether the system could confirm association.
   WifiJoinStatus status;
   /// Set for successful Android app-scoped joins with a usable network address.
-  std::shared_ptr<const WifiNetworkLease> network;
+  std::shared_ptr<const WifiNetworkLease> lease;
 };
 
 /// @brief Reports whether the build includes a Wi-Fi scan adapter.

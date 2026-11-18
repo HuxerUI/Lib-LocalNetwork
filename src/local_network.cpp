@@ -559,18 +559,18 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
   co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Direct TCP is unavailable on this platform."});
 #else
   if (!detail::ValidHost(endpoint.host) || endpoint.port == 0 ||
-      options.timeout <= std::chrono::milliseconds::zero() || options.android_network == 0 ||
-      (options.android_network && options.wifi_network)) {
+      options.timeout <= std::chrono::milliseconds::zero() || options.android_network_handle == 0 ||
+      (options.android_network_handle && options.wifi_lease)) {
     co_return Result::Failure(
         {NetworkErrorCode::InvalidEndpoint, 0, "A host, nonzero port, and valid dial options are required."});
   }
   const NetworkError network_lost{NetworkErrorCode::NetworkLost, 0, "The selected Wi-Fi network was lost."};
-  auto network = options.android_network;
-  if (options.wifi_network) {
-    network = options.wifi_network->AndroidNetwork();
+  auto network = options.android_network_handle;
+  if (options.wifi_lease) {
+    network = options.wifi_lease->AndroidNetwork();
     if (!network) co_return Result::Failure(network_lost);
   }
-  const auto lost = [&] { return options.wifi_network && !options.wifi_network->AndroidNetwork(); };
+  const auto lost = [&] { return options.wifi_lease && !options.wifi_lease->AndroidNetwork(); };
   const auto now = detail::Clock::now();
   const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(detail::Clock::time_point::max() - now);
   const auto deadline = options.timeout >= remaining ? detail::Clock::time_point::max() : now + options.timeout;
@@ -605,7 +605,7 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
     auto path = socket->Path();
     if (!path.Succeeded()) co_return Result::Failure(std::move(path).Error());
     if (lost()) co_return Result::Failure(network_lost);
-    socket->RetainWifiNetwork(options.wifi_network);
+    socket->RetainWifiNetwork(options.wifi_lease);
     co_return Result::Success(TcpConnection(std::move(socket), std::move(path).Value()));
   }
   co_return Result::Failure(std::move(failure));

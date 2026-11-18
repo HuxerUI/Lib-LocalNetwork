@@ -295,7 +295,7 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(std::
 Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService service) {
   using Result = NetworkResult<ResolvedService>;
   auto state = std::make_shared<ResolveRequest>();
-  state->query = Wide(service.instance);
+  state->query = Wide(service.instance_id);
   if (state->query.empty() || service.scope > std::numeric_limits<DWORD>::max()) {
     co_return Result::Failure(Error(ERROR_INVALID_PARAMETER, "Invalid DNS-SD instance name."));
   }

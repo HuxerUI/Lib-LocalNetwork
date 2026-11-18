@@ -129,7 +129,7 @@ Task<NetworkResult<TlsConnection>> DialTlsAsync(Endpoint endpoint, TlsDialOption
 #ifdef HUXERUI_LOCALNETWORK_TLS
   auto server = ParseServerName(options.server_name.empty() ? endpoint.host : std::move(options.server_name));
   if (!server) co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "Invalid TLS server name."});
-  const auto lease = options.tcp.wifi_network;
+  const auto lease = options.tcp.wifi_lease;
   auto dialed = co_await DialTcpAsync(std::move(endpoint), std::move(options.tcp));
   if (!dialed.Succeeded()) co_return Result::Failure(dialed.Error());
   auto path = dialed.Value().Path();

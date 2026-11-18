@@ -143,7 +143,7 @@ NetworkResult<WifiScanResult> Scan() {
   result.refreshed = Refresh(client, adapter.c_str());
   auto failure = client.Failure(NetworkErrorCode::WifiScanFailed, "NetworkManager could not scan for Wi-Fi networks.");
   for (auto& point : AccessPoints(client, adapter.c_str())) result.networks.push_back(std::move(point.network));
-  if (result.networks.empty() && !result.refreshed && failure.system_code != 0) {
+  if (result.networks.empty() && !result.refreshed && failure.diagnostic_code != 0) {
     return Result::Failure(std::move(failure));
   }
   return Result::Success(std::move(result));

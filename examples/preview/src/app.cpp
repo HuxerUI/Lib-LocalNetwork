@@ -81,8 +81,8 @@ std::string FormatEndpoint(const Endpoint& endpoint) {
 }
 
 std::string FormatError(const NetworkError& error) {
-  if (error.system_code == 0) return error.message;
-  return error.message + " (" + std::to_string(error.system_code) + ")";
+  if (error.diagnostic_code == 0) return error.message;
+  return error.message + " (" + std::to_string(error.diagnostic_code) + ")";
 }
 
 void FinishOperation(const State<PreviewState>& state, std::string status) {
@@ -189,7 +189,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
                          std::optional<DiscoveredService> discovered = {}) {
     if (state->busy || wifi->busy || !state->source) return;
     // Snapshot the route once for this dial. Manual and QR entry share the same paired transport.
-    TcpDialOptions options{.wifi_network = wifi->network};
+    TcpDialOptions options{.wifi_lease = wifi->network};
     state.Update([](PreviewState& value) { value.busy = true; value.status = "Loading the device identity..."; });
     running = tasks.Launch([=, endpoint = std::move(endpoint), source = *state->source, options = std::move(options),
                             invitation = std::move(invitation), discovered = std::move(discovered)]() mutable
@@ -322,9 +322,9 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
   std::vector<View> device_buttons;
   for (const auto& service : state->discovered) {
     if (wifi->network && (!leased || service.scope != *leased)) continue;
-    device_buttons.push_back(Button(service.name).With(Enabled(idle && state->source.has_value()))
+    device_buttons.push_back(Button(service.display_name).With(Enabled(idle && state->source.has_value()))
         .OnClick([start, code, service] { start(false, {}, code->text, service); })
-        .Key(service.instance + "#" + std::to_string(service.scope)));
+        .Key(service.instance_id + "#" + std::to_string(service.scope)));
   }
 
   return ScrollView {

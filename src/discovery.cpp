@@ -118,7 +118,7 @@ Task<NetworkResult<ServiceEvent>> ReadChange(std::shared_ptr<detail::ServiceBrow
     if (!snapshot.Succeeded()) co_return Result::Failure(std::move(snapshot).Error());
     detail::ServiceBrowserState::Services visible;
     for (auto& service : snapshot.Value()) {
-      auto key = std::pair{service.instance, service.scope};
+      auto key = std::pair{service.instance_id, service.scope};
       visible.try_emplace(std::move(key), std::move(service));
     }
     // Keep the previous snapshot across failed observations to avoid spurious removals on transient errors.
@@ -129,7 +129,9 @@ Task<NetworkResult<ServiceEvent>> ReadChange(std::shared_ptr<detail::ServiceBrow
     for (const auto& [key, service] : visible) {
       const auto previous = state->visible.find(key);
       if (previous == state->visible.end()) changes.push_back({ServiceChange::Added, service});
-      else if (previous->second.name != service.name) changes.push_back({ServiceChange::Changed, service});
+      else if (previous->second.display_name != service.display_name) {
+        changes.push_back({ServiceChange::DisplayNameChanged, service});
+      }
     }
     state->visible = std::move(visible);
     state->events = std::move(changes);
@@ -206,7 +208,8 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowseServicesAsync(
 
 Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService service) {
   using Result = NetworkResult<ResolvedService>;
-  if (!ValidType(service.type) || service.instance.empty() || service.instance.find('\0') != std::string::npos) {
+  if (!ValidType(service.type) || service.instance_id.empty() ||
+      service.instance_id.find('\0') != std::string::npos) {
     co_return Result::Failure(InvalidService());
   }
   if constexpr (discovery_supported) {

@@ -103,7 +103,7 @@ struct WebBridgePolicy {
 };
 
 /// @brief A listener registered through a browser control session.
-struct WebBridgeRegistration {
+struct WebBridgeListenerRegistration {
   /// Opaque nonzero identifier valid for the control connection that registered it.
   std::uint32_t id = 0;
   /// Actual desktop listening address and system-assigned port.
@@ -142,7 +142,7 @@ public:
   /// Supply a pairing code for a first connection. An empty code uses the remembered peer public key.
   Task<NetworkResult<WebBridgeConnection>> DialAsync(Endpoint endpoint, PeerId peer, std::string pairing_code = {});
   /// Registers a listener on the desktop application's approved address.
-  Task<NetworkResult<WebBridgeRegistration>> ListenAsync();
+  Task<NetworkResult<WebBridgeListenerRegistration>> ListenAsync();
   /// Publishes an approved service type and public TXT attributes for the registered listener.
   /// To publish again for the same listener, withdraw its current publication first.
   Task<NetworkResult<void>> PublishAsync(std::uint32_t listener, std::string name, std::string type,

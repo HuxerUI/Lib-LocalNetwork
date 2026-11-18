@@ -177,8 +177,8 @@ void PermissionDenied(const State<PreviewWifiRoute>& route, const State<WifiPane
         co_return;
       }
       auto joined_wifi = std::move(joined).Value();
-      const bool bound = static_cast<bool>(joined_wifi.network);
-      route.Update([&](PreviewWifiRoute& value) { value.network = std::move(joined_wifi.network); });
+      const bool bound = static_cast<bool>(joined_wifi.lease);
+      route.Update([&](PreviewWifiRoute& value) { value.network = std::move(joined_wifi.lease); });
       if (joined_wifi.status == WifiJoinStatus::ConfigurationAccepted) {
         FinishWifi(route, state, "Configuration accepted. Confirm the association in Wi-Fi settings.");
       } else {

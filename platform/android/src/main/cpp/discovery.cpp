@@ -71,7 +71,8 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
   using Result = NetworkResult<ResolvedService>;
   auto module = Open();
   PlatformPayload request = PlatformPayload::Object{
-      {"name", service.instance}, {"type", service.type}, {"network", static_cast<std::int64_t>(service.scope)}};
+      {"name", service.instance_id}, {"type", service.type},
+      {"network", static_cast<std::int64_t>(service.scope)}};
   auto resolved = co_await module->Call("resolve", std::move(request));
   if (const auto* error = std::get_if<PlatformError>(&resolved)) co_return Result::Failure(Failure(*error));
   const auto& fields = std::get<PlatformPayload>(resolved).AsObject();
@@ -79,8 +80,8 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
   if (port <= 0 || port > 65535) co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "Invalid DNS-SD port."});
   ResolvedService value;
   const auto network = fields.at("network").AsInteger();
-  if (network != 0) value.android_network = static_cast<std::uint64_t>(network);
-  else if (service.scope != 0) value.android_network = service.scope;
+  if (network != 0) value.android_network_handle = static_cast<std::uint64_t>(network);
+  else if (service.scope != 0) value.android_network_handle = service.scope;
   for (const auto& address : fields.at("addresses").AsList()) {
     value.endpoints.push_back({std::string(address.AsString()), static_cast<std::uint16_t>(port)});
   }

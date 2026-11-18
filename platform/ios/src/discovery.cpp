@@ -276,7 +276,7 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
   BonjourRequest resolve;
   const auto deadline = Clock::now() + operation_timeout;
   const auto started = DNSServiceResolve(resolve.Out(), 0, static_cast<std::uint32_t>(service.scope),
-      service.instance.c_str(), service.type.c_str(), domain, OnResolve, &state);
+      service.instance_id.c_str(), service.type.c_str(), domain, OnResolve, &state);
   if (started != kDNSServiceErr_NoError) co_return Result::Failure(BonjourError(started, "Could not resolve the service."));
   const auto status = co_await DispatchUntil(resolve, deadline, [&state] {
     return !state.host.empty() || state.error != kDNSServiceErr_NoError;

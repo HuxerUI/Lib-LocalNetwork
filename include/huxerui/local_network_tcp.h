@@ -36,10 +36,10 @@ struct TcpDialOptions {
   /// Android uses this handle for both resolution and every socket attempt. Keep any system network request that
   /// maintains the network active until the connection closes. Leave this empty to use system routing.
   /// Supplying a nonzero handle outside Android returns Unsupported.
-  std::optional<std::uint64_t> android_network;
+  std::optional<std::uint64_t> android_network_handle;
   /// Optional app-scoped Android Wi-Fi lease from JoinWifiAsync(). The connection retains it until close.
-  /// A lost lease fails the dial. Set either this field or android_network.
-  std::shared_ptr<const WifiNetworkLease> wifi_network;
+  /// A lost lease fails the dial. Set either this field or android_network_handle.
+  std::shared_ptr<const WifiNetworkLease> wifi_lease;
 };
 
 /// @brief An owning TCP connection with independent input and output stream handles.

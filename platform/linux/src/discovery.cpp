@@ -257,7 +257,7 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowsePlatformServices(
   std::vector<DiscoveredService> entries;
   for (const auto& [name, index, protocol] : state.visible) {
     const auto scope = index > 0 ? static_cast<std::uint64_t>(index) : 0;
-    if (!entries.empty() && entries.back().instance == name && entries.back().scope == scope) continue;
+    if (!entries.empty() && entries.back().instance_id == name && entries.back().scope == scope) continue;
     entries.push_back({name, type, name, scope});
     if (entries.size() == 128) break;
   }
@@ -277,7 +277,7 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
   {
     std::scoped_lock lock(*session);
     auto* client = session->Client();
-    if (!avahi_service_resolver_new(client, index, AVAHI_PROTO_UNSPEC, service.instance.c_str(), service.type.c_str(),
+    if (!avahi_service_resolver_new(client, index, AVAHI_PROTO_UNSPEC, service.instance_id.c_str(), service.type.c_str(),
                                    domain, AVAHI_PROTO_UNSPEC, AVAHI_LOOKUP_USE_MULTICAST, OnResolve, &state)) {
       co_return Result::Failure(AvahiError(avahi_client_errno(client), "Could not resolve the DNS-SD service."));
     }

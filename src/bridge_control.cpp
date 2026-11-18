@@ -151,11 +151,11 @@ Task<NetworkResult<WebBridgeConnection>> WebBridgeControl::DialAsync(Endpoint en
   return detail::OpenData(state_, detail::Request(detail::BridgeOperation::Dial, endpoint, peer, pairing_code), peer);
 }
 
-Task<NetworkResult<WebBridgeRegistration>> WebBridgeControl::ListenAsync() {
+Task<NetworkResult<WebBridgeListenerRegistration>> WebBridgeControl::ListenAsync() {
   return detail::ReadReply(state_, detail::Request(detail::BridgeOperation::Listen), [](detail::ControlReader& reader) {
     const auto id = reader.U32();
     if (id == 0) reader.Reject();
-    return WebBridgeRegistration{id, reader.ReadEndpoint()};
+    return WebBridgeListenerRegistration{id, reader.ReadEndpoint()};
   });
 }
 

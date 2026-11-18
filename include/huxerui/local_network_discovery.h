@@ -31,11 +31,11 @@ struct ServiceBrowserState;
 /// @brief A discovered service in the local DNS-SD domain.
 struct DiscoveredService {
   /// Instance label as reported by the system. Use this for display.
-  std::string name;
+  std::string display_name;
   /// TCP service type such as _huxer-lan._tcp.
   std::string type;
   /// Opaque instance identifier used by ResolveServiceAsync(). Keep it with type and scope.
-  std::string instance;
+  std::string instance_id;
   /// Platform resolution scope. Windows, macOS, iOS, and Linux use an interface index.
   /// Android uses a system network handle.
   /// Zero means the browse result came without a specific scope.
@@ -44,9 +44,9 @@ struct DiscoveredService {
 
 /// @brief Changes in the set of services observed by a service browser.
 enum class ServiceChange {
-  Added,   ///< A service became visible on its discovery scope.
-  Changed, ///< The system reported a different display label for the same service reference.
-  Removed, ///< A service is absent from a later successful observation.
+  Added,              ///< A service became visible on its discovery scope.
+  DisplayNameChanged, ///< The system reported a different display label for the same service reference.
+  Removed,            ///< A service is absent from a later successful observation.
 };
 
 /// @brief A change to one service instance on one discovery scope.
@@ -107,8 +107,9 @@ using ServiceTxt = std::map<std::string, std::string, std::less<>>;
 struct ResolvedService {
   /// Candidate numeric endpoints with the resolved TCP port. Preserve any IPv6 scope included in the host.
   std::vector<Endpoint> endpoints;
-  /// Available when Android supplies a network handle. Pass it to TcpDialOptions::android_network for each dial.
-  std::optional<std::uint64_t> android_network;
+  /// Android system network handle, when available. Pass it to TcpDialOptions::android_network_handle when dialing
+  /// a resolved endpoint without a Wi-Fi lease.
+  std::optional<std::uint64_t> android_network_handle;
   /// Text attributes returned by the system. Invalid or non-text attributes are ignored.
   ServiceTxt txt;
 };
