@@ -189,15 +189,15 @@ Task<IoResult<void>> CreateSample(File file) {
 #endif
 }
 
-Task<IoResult<TransferResult>> ExchangeFiles(TaskScope tasks, PairedConnection connection,
+Task<IoResult<TransferResult>> ExchangeFiles(TaskScope tasks, Connection connection,
                                             Source source, File partial, File destination) {
   using Result = IoResult<TransferResult>;
 #ifdef HUXERUI_LOCALNETWORK_PREVIEW_TLS
-  auto peer = std::make_shared<PairedConnection>(std::move(connection));
+  auto peer = std::make_shared<Connection>(std::move(connection));
   auto result = std::make_shared<std::optional<IoResult<std::uint64_t>>>();
   // Cancel the sibling writer and remove incomplete output if the receive task is canceled or fails.
   struct Exchange {
-    std::shared_ptr<PairedConnection> peer;
+    std::shared_ptr<Connection> peer;
     TaskHandle sending;
     File partial;
     File destination;

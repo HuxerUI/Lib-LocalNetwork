@@ -1,7 +1,7 @@
 #pragma once
 
 /// @file
-/// @brief Unified outbound connections to manually entered addresses and DNS-SD services.
+/// @brief Unified listeners and connections with TCP, direct TLS, and paired TLS modes.
 ///
 /// Include <huxerui/local_network_connection.h> and link HuxerUI::LocalNetwork. Run connection tasks in a
 /// HuxerUI TaskScope. On Android, add Install() to the application hooks for discovery and platform TLS trust.
@@ -89,6 +89,99 @@ public:
 private:
   std::variant<TcpConnection, TlsConnection, PairedConnection> transport_;
 };
+
+/// @brief Transport used for incoming connections.
+enum class ListenMode {
+  PairedTls, ///< TLS 1.3 with mutual device authentication and application pairing policy.
+  Tls,       ///< Direct TLS with a server certificate supplied by the application.
+  Tcp,       ///< Unencrypted TCP without peer authentication.
+};
+
+/// @brief Local identity and authorization policy for a paired listener.
+struct PairedListenOptions {
+  /// Device identity presented to dialing peers. Copies share revocations with the application.
+  DeviceIdentity identity;
+  /// Remembered peers, optional existing invitation, and approval callback for new peers.
+  /// The callback runs in the application task scope. Capture any UI state or services it needs.
+  PairingPolicy policy;
+};
+
+/// @brief Bind address and credentials for the selected incoming transport.
+struct ListenOptions {
+  /// Numeric bind address and port. Zero requests a system-assigned port. The default binds to loopback.
+  Endpoint endpoint{"127.0.0.1", 0};
+  /// Defaults to authenticated device sessions. Select Tls or Tcp explicitly for other protocols.
+  ListenMode mode = ListenMode::PairedTls;
+  /// Required in PairedTls mode.
+  std::optional<PairedListenOptions> pairing;
+  /// PEM leaf certificate followed by its intermediate certificates in issuer order for Tls mode.
+  std::string certificate_pem;
+  /// Unencrypted matching PEM private key for Tls mode. Move the options to transfer the key buffer.
+  std::string private_key_pem;
+};
+
+namespace detail {
+struct ListenerState;
+}
+
+/// @brief Owns a listening endpoint and its DNS-SD registrations.
+///
+/// Open the listener before advertising it or creating an invitation. Each accepted connection has its own
+/// lifetime. Run asynchronous operations on the application thread in a HuxerUI TaskScope.
+class Listener final {
+public:
+  /// Transfers ownership of the listener and its registrations.
+  Listener(Listener&&) noexcept;
+  /// Closes the current listener and transfers ownership from the supplied listener.
+  Listener& operator=(Listener&&) noexcept;
+  /// Closes the listener and withdraws its registrations. Accepted connections stay open.
+  ~Listener();
+
+  /// Returns the bound numeric address and actual port, or an empty endpoint after a move.
+  const Endpoint& LocalEndpoint() const noexcept;
+
+  /// @brief Publishes this listener's bound endpoint until the listener closes.
+  ///
+  /// Publication requires a concrete address on an interface that supports DNS-SD. A publication failure
+  /// leaves the listener available for direct connections.
+  /// @param name DNS-SD instance label, using the same syntax as ServiceAnnouncement::name.
+  /// @param type TCP service type, using the same syntax as BrowseServicesAsync().
+  /// @param txt Public TXT attributes. Keep pairing credentials out of DNS-SD.
+  /// @return A lazy task that registers the service or returns a NetworkError.
+  Task<NetworkResult<void>> AdvertiseAsync(std::string name, std::string type, ServiceTxt txt = {});
+
+  /// @brief Creates a five-minute invitation for a paired listener.
+  ///
+  /// Share the code through a trusted exchange and supply LocalEndpoint() to the dialing peer separately.
+  /// A successful call replaces the invitation used by subsequent TCP accepts. An accept already authenticating
+  /// a peer keeps its original policy.
+  /// @return An invitation, Closed for a closed listener, or Unsupported for a listener in another mode.
+  NetworkResult<PairingOffer> CreateInvite();
+
+  /// @brief Waits for the next connection and completes the selected transport's handshake.
+  /// @return A lazy task yielding an owning connection. A concurrent accept returns Busy. Closing the listener
+  /// ends a pending accept with Closed. Cancel the task to stop waiting and keep listening.
+  Task<NetworkResult<Connection>> AcceptAsync();
+
+  /// Stops accepting, ends pending handshakes or approvals, and requests withdrawal of all registrations.
+  /// Connections already returned by AcceptAsync() stay open.
+  void Close() noexcept;
+
+private:
+  explicit Listener(std::shared_ptr<detail::ListenerState> state);
+  static Task<NetworkResult<Connection>> Accept(std::shared_ptr<detail::ListenerState> state);
+  static Task<NetworkResult<void>> Advertise(std::shared_ptr<detail::ListenerState> state, ServiceAnnouncement service);
+
+  std::shared_ptr<detail::ListenerState> state_;
+  friend Task<NetworkResult<Listener>> ListenAsync(ListenOptions options);
+};
+
+/// @brief Opens a direct listener using the requested transport and credentials.
+///
+/// On Web, use the bridge API for incoming connections.
+/// @param options Numeric bind endpoint and the settings for the selected transport.
+/// @return A lazy task yielding an owning listener or a NetworkError.
+Task<NetworkResult<Listener>> ListenAsync(ListenOptions options);
 
 /// @brief Connects to a HuxerUI peer using TLS pairing or a remembered public key.
 ///

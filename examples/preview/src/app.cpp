@@ -114,83 +114,49 @@ Task<bool> ConfirmPairing(State<PreviewState> state, PeerId peer, std::chrono::s
   co_return approved;
 }
 
-Task<NetworkResult<PairedConnection>> ListenForPeer(
+Task<NetworkResult<Connection>> ListenForPeer(
     Endpoint endpoint, DeviceIdentity identity, std::optional<PeerId> remembered, State<PreviewState> state) {
-  using Result = NetworkResult<PairedConnection>;
-  auto opened = co_await ListenTcpAsync(std::move(endpoint));
+  using Result = NetworkResult<Connection>;
+  PairingPolicy policy;
+  if (remembered) policy.trusted_peers.push_back(*remembered);
+  policy.approve = [state](PeerId peer, std::chrono::steady_clock::time_point expires) {
+    return ConfirmPairing(state, peer, expires);
+  };
+  ListenOptions options{.endpoint = std::move(endpoint),
+                        .pairing = PairedListenOptions{std::move(identity), std::move(policy)}};
+  auto opened = co_await ListenAsync(std::move(options));
   if (!opened.Succeeded()) co_return Result::Failure(std::move(opened).Error());
   auto listener = std::move(opened).Value();
-  auto offer = PairingOffer::Create(identity);
+  auto offer = listener.CreateInvite();
   if (!offer.Succeeded()) co_return Result::Failure(std::move(offer).Error());
-  auto qr = MakeInvitationQr(listener.LocalEndpoint(), offer.Value().Code());
+  auto code = offer.Value().Code();
+  auto qr = MakeInvitationQr(listener.LocalEndpoint(), code);
   state.Update([&](PreviewState& value) {
     value.status = "Listening on " + FormatEndpoint(listener.LocalEndpoint());
-    value.invitation = offer.Value().Code();
+    value.invitation = std::move(code);
     value.invitation_qr = std::move(qr);
   });
-  std::optional<ServicePublication> publication;
   if (IsDiscoverySupported()) {
-    auto published = co_await PublishServiceAsync({service_name, service_type, listener.LocalEndpoint()});
+    // Manual and QR invitations use the bound endpoint even when the system rejects publication.
+    auto published = co_await listener.AdvertiseAsync(service_name, service_type);
     state.Update([&](PreviewState& value) {
       value.publication_status = published.Succeeded() ? "Visible in the device list."
                                                       : FormatError(published.Error());
     });
-    if (published.Succeeded()) publication.emplace(std::move(published).Value());
   }
-  auto accepted = co_await listener.AcceptAsync();
-  if (!accepted.Succeeded()) co_return Result::Failure(std::move(accepted).Error());
-  publication.reset();
-  PairingPolicy policy;
-  if (remembered) policy.trusted_peers.push_back(*remembered);
-  policy.offer = std::move(offer).Value();
-  policy.approve = [state](PeerId peer, std::chrono::steady_clock::time_point expires) {
-    return ConfirmPairing(state, peer, expires);
-  };
-  co_return co_await AcceptPairedAsync(std::move(accepted).Value(), std::move(identity), std::move(policy));
+  co_return co_await listener.AcceptAsync();
 }
 
-Task<NetworkResult<PairedConnection>> DialPeer(
-    Endpoint endpoint, DeviceIdentity identity, std::optional<PeerId> remembered, std::string code,
+Task<NetworkResult<Connection>> DialPeer(
+    Target target, DeviceIdentity identity, std::optional<PeerId> remembered, std::string code,
     TcpDialOptions options) {
-  using Result = NetworkResult<PairedConnection>;
+  using Result = NetworkResult<Connection>;
   if (code.empty() && remembered) {
-    co_return co_await ConnectPairedAsync(std::move(endpoint), identity, *remembered, options);
+    co_return co_await ConnectAsync(std::move(target), std::move(identity), *remembered, std::move(options));
   }
   const auto parsed = PairingCode::Parse(code);
   if (!parsed) co_return Result::Failure({NetworkErrorCode::PairingRejected, 0, "Enter a valid pairing code."});
-  co_return co_await ConnectPairedAsync(std::move(endpoint), identity, *parsed, options);
-}
-
-Task<NetworkResult<PairedConnection>> DialDiscovered(
-    DiscoveredService service, DeviceIdentity identity, std::optional<PeerId> remembered, std::string code,
-    TcpDialOptions options) {
-  using Result = NetworkResult<PairedConnection>;
-  const auto leased = options.wifi_network ? options.wifi_network->AndroidNetwork() : std::nullopt;
-  if (options.wifi_network && !leased) {
-    co_return Result::Failure({NetworkErrorCode::NetworkLost, 0, "The Wi-Fi route was lost. Join the hotspot again."});
-  }
-  // An unscoped DNS-SD result cannot identify a peer on the selected Android network.
-  if (leased && service.scope != *leased) {
-    co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "Use an address or QR invitation on this Wi-Fi route."});
-  }
-  auto resolved = co_await ResolveServiceAsync(std::move(service));
-  if (!resolved.Succeeded()) co_return Result::Failure(std::move(resolved).Error());
-  const auto resolved_network = resolved.Value().android_network;
-  if (leased && resolved_network && resolved_network != leased) {
-    co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "The resolved device belongs to another network."});
-  }
-  if (!leased) options.android_network = resolved_network;
-  const auto& endpoints = resolved.Value().endpoints;
-  NetworkError failure{NetworkErrorCode::ResolveFailed, 0, "No resolved address could be reached."};
-  for (const auto& endpoint : endpoints) {
-    auto connected = co_await DialPeer(endpoint, identity, remembered, code, options);
-    if (connected.Succeeded()) co_return connected;
-    failure = std::move(connected).Error();
-    // Reachability may differ between addresses, but never retry another address after an identity rejection.
-    if (failure.code != NetworkErrorCode::ConnectionFailed && failure.code != NetworkErrorCode::TimedOut) break;
-    failure.message += " Endpoint " + FormatEndpoint(endpoint) + ".";
-  }
-  co_return Result::Failure(std::move(failure));
+  co_return co_await ConnectAsync(std::move(target), std::move(identity), *parsed, std::move(options));
 }
 
 struct TemporaryImage {
@@ -240,12 +206,10 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
         value.status = listen ? "Opening listener..." : discovered ? "Resolving service..." : "Connecting...";
       });
       auto local_identity = std::move(identity).Value();
-      Task<NetworkResult<PairedConnection>> connect = listen
+      auto connect = listen
           ? ListenForPeer(std::move(endpoint), std::move(local_identity), remembered, state)
-          : discovered ? DialDiscovered(std::move(*discovered), std::move(local_identity), remembered,
-                                       std::move(invitation), std::move(options))
-                       : DialPeer(std::move(endpoint), std::move(local_identity), remembered, std::move(invitation),
-                                  std::move(options));
+          : DialPeer(discovered ? Target(std::move(*discovered)) : Target(std::move(endpoint)),
+                     std::move(local_identity), remembered, std::move(invitation), std::move(options));
       auto paired = co_await std::move(connect);
       if (!paired.Succeeded()) {
         FinishOperation(state, FormatError(paired.Error()));
@@ -253,7 +217,8 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
       }
 
       auto connection = std::move(paired).Value();
-      const bool remembered_now = co_await remembered_peer.WriteStringAsync(connection.Peer().ToString());
+      const auto security = connection.Security();
+      const bool remembered_now = security.peer && co_await remembered_peer.WriteStringAsync(security.peer->ToString());
       const auto path = FormatEndpoint(connection.Path().local) + " to " + FormatEndpoint(connection.Path().remote);
       state.Update([&](PreviewState& value) {
         value.status = "TLS 1.3 connected. Transferring files on " + path;

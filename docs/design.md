@@ -44,8 +44,8 @@ public:
 
 class Listener {
 public:
-  Task<NetResult<Publication>> AdvertiseAsync(ServiceInfo service);
-  Task<NetResult<Invite>> CreateInviteAsync(InviteOptions options);
+  Task<NetResult<void>> AdvertiseAsync(std::string name, std::string type, ServiceTxt txt = {});
+  NetResult<PairingOffer> CreateInvite();
   Task<NetResult<Connection>> AcceptAsync();
 };
 
@@ -81,7 +81,19 @@ Adapt platform I/O through HuxerUI's `AsyncInputStream::FromReader` and `AsyncOu
 
 The installed HuxerUI SDK 0.4.0 headers lack the public callback-backed stream factories. Implementation requires a matching SDK that exposes both factories. Lib-PluginKit already uses that contract. [HuxerUI stream API](https://github.com/HuxerUI/HuxerUI/blob/main/include/huxerui/stream.h) · [Lib-PluginKit stream adapter](https://github.com/HuxerUI/Lib-PluginKit/blob/main/include/huxerui/pluginkit/detail/streams.h)
 
-### Unified outbound connections
+### Unified listening and outbound connections
+
+`ListenAsync()` defaults to paired TLS. Pass the device identity and the incoming pairing policy, then use
+`CreateInvite()` to open a pairing window if the listener should accept new peers. Select `ListenMode::Tls` for
+an application-supplied certificate or `ListenMode::Tcp` for plain TCP. In all three modes `AcceptAsync()`
+returns an owning `Connection` after the selected transport is ready. Existing transport-specific APIs remain
+available.
+
+`AdvertiseAsync()` publishes the actual bound endpoint, including the system-assigned port. Keep the listener
+open to keep its registrations active. A registration failure leaves manual address and QR entry available.
+Closing the listener withdraws its registrations and ends a pending accept. Connections already returned to
+the application retain their streams. Preview uses the common listener and dials manual, scanned, and discovered
+targets through `ConnectAsync()`. [Unified connection API](../include/huxerui/local_network_connection.h)
 
 The library exposes free functions `ConnectAsync()` and `DialAsync()`. Both accept an `Endpoint` or a
 `DiscoveredService`. `ConnectAsync()` uses a local device identity and a remembered key or pairing code.

@@ -3,7 +3,7 @@
 #include <variant>
 
 #include <huxerui/file.h>
-#include <huxerui/local_network_pairing.h>
+#include <huxerui/local_network_connection.h>
 
 namespace local_network_preview {
 
@@ -20,7 +20,7 @@ huxerui::Task<huxerui::IoResult<void>> CreateSample(huxerui::File file);
 /// Exchanges one file in each direction and verifies the received SHA-256 before moving partial to destination.
 /// Supply distinct scratch and destination paths owned by this transfer. Failure may remove both paths.
 huxerui::Task<huxerui::IoResult<TransferResult>> ExchangeFiles(
-    huxerui::TaskScope tasks, huxerui::localnetwork::PairedConnection connection,
+    huxerui::TaskScope tasks, huxerui::localnetwork::Connection connection,
     Source source, huxerui::File partial, huxerui::File destination);
 
 } // namespace local_network_preview

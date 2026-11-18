@@ -4,7 +4,7 @@
 /// @brief Public entry point for Lib-LocalNetwork.
 ///
 /// Include <huxerui/local_network.h> and link HuxerUI::LocalNetwork to use service discovery, device pairing,
-/// TCP and TLS clients, TCP listeners, Wi-Fi operations, and browser bridging. Include individual headers as needed.
+/// TCP and TLS clients and listeners, Wi-Fi operations, and browser bridging. Include individual headers as needed.
 
 #include <huxerui/local_network_bridge.h>
 #include <huxerui/local_network_common.h>
