@@ -124,7 +124,9 @@ using PeerCredential = std::variant<PeerId, PairingCode>;
 /// @brief Application approval for the requesting public key after certificate and invitation checks.
 ///
 /// The arguments are the requesting device's PeerId and the invitation expiry on the steady clock.
-/// Return true before that deadline to approve. Any state borrowed by the callback must outlive the accept task.
+/// The callback runs as a task on the application thread and must allow that thread to continue processing work.
+/// Return true before the deadline to approve. The library cancels the pending task at expiry and ignores late
+/// results. Keep borrowed state alive for the accept and provide cancellation cleanup for external work.
 using PairingApproval = std::function<Task<bool>(PeerId, std::chrono::steady_clock::time_point)>;
 
 /// @brief Authentication policy for a connection accepted by a plain TCP listener.
@@ -213,6 +215,7 @@ Task<NetworkResult<PairedConnection>> ConnectPairedAsync(
 ///
 /// Save Peer() after success if the application should allow future reconnects from this device.
 /// A peer revoked on this identity is rejected even if the policy trusts its public key.
+/// If the invitation expires while awaiting approval, the accept returns TimedOut and closes the transport.
 /// @param connection A newly accepted connection with both streams still unused.
 /// @param identity Local identity used for TLS server authentication.
 /// @param policy Remembered peers, optional invitation, user approval callback, and required connection purpose.

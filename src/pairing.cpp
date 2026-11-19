@@ -216,6 +216,7 @@ constexpr auto handshake_timeout = 20s;
 constexpr std::size_t stream_chunk = 64 * 1024;
 constexpr std::uint8_t reconnect = 0;
 constexpr std::uint8_t pair = 1;
+constexpr std::uint8_t rejected = 0;
 constexpr std::uint8_t accepted = 1;
 
 struct AuthenticatedPeer {
@@ -237,6 +238,10 @@ NetworkError CryptoError(NetworkErrorCode code, int error, std::string message) 
 }
 
 NetworkError PairingRejected() { return {NetworkErrorCode::PairingRejected, 0, "Pairing was rejected."}; }
+
+NetworkError ApprovalTimedOut() {
+  return {NetworkErrorCode::TimedOut, 0, "Pairing approval timed out. Create a new invitation and try again."};
+}
 
 NetworkError IncompatibleProtocol(int diagnostic = 0) {
   return {NetworkErrorCode::IncompatibleVersion, diagnostic,
@@ -621,14 +626,41 @@ Task<NetworkResult<AuthenticatedPeer>> Authenticate(TlsSocket& socket, bool list
   co_return socket.Peer();
 }
 
-Task<bool> ApproveInvite(std::shared_ptr<InvitationState> invitation, PeerId peer, std::span<const unsigned char> proof,
-                         const PairingApproval& approve) {
+enum class ApprovalDecision { Approved, Rejected, Expired };
+
+Task<void> RunPairingApproval(PairingApproval approve, PeerId peer, Clock::time_point expires,
+                              CallbackCompletion<ApprovalDecision> completion) {
+  if (Clock::now() >= expires) {
+    completion.Complete(ApprovalDecision::Expired);
+    co_return;
+  }
+  try {
+    const bool approved = co_await approve(peer, expires);
+    const auto decision = approved ? ApprovalDecision::Approved : ApprovalDecision::Rejected;
+    // Check the deadline before publishing the result. Dispatching the accept continuation can take longer.
+    completion.Complete(Clock::now() < expires ? decision : ApprovalDecision::Expired);
+  } catch (...) {
+    if (Clock::now() < expires) completion.Fail(std::current_exception());
+    else completion.Complete(ApprovalDecision::Expired);
+  }
+}
+
+Task<void> WaitForApprovalExpiry(Clock::time_point expires, CallbackCompletion<ApprovalDecision> completion) {
+  const auto remaining = expires - Clock::now();
+  if (remaining > Clock::duration::zero()) co_await Delay(remaining);
+  completion.Complete(ApprovalDecision::Expired);
+}
+
+Task<NetworkResult<bool>> ApproveInvite(std::shared_ptr<InvitationState> invitation, PeerId peer,
+                                        std::span<const unsigned char> proof, PairingApproval approve) {
+  using Result = NetworkResult<bool>;
   {
     std::scoped_lock lock(invitation->mutex);
     if (Clock::now() >= invitation->expires ||
-        mbedtls_ct_memcmp(invitation->secret.data(), proof.data(), invitation->secret.size()) != 0) co_return false;
-    if (invitation->approved_peer) co_return invitation->approved_peer == peer;
-    if (invitation->approval_pending || !approve) co_return false;
+        mbedtls_ct_memcmp(invitation->secret.data(), proof.data(), invitation->secret.size()) != 0)
+      co_return Result::Success(false);
+    if (invitation->approved_peer) co_return Result::Success(invitation->approved_peer == peer);
+    if (invitation->approval_pending || !approve) co_return Result::Success(false);
     invitation->approval_pending = true;
   }
   // Release the reservation if the approval task is canceled. A redeemed offer can only replay to the same key.
@@ -636,11 +668,28 @@ Task<bool> ApproveInvite(std::shared_ptr<InvitationState> invitation, PeerId pee
     InvitationState& offer;
     ~Release() { std::scoped_lock lock(offer.mutex); offer.approval_pending = false; }
   } release{*invitation};
-  if (!co_await approve(peer, invitation->expires)) co_return false;
-  std::scoped_lock lock(invitation->mutex);
-  if (Clock::now() >= invitation->expires) co_return false;
-  invitation->approved_peer = peer;
-  co_return true;
+
+  // Keep both handles until this wait exits, including cancellation after a result was queued.
+  struct ApprovalTasks {
+    TaskHandle callback;
+    TaskHandle timer;
+    ~ApprovalTasks() { callback.Cancel(); timer.Cancel(); }
+  } tasks;
+  const auto expires = invitation->expires;
+  const auto decision = co_await AwaitCallback<ApprovalDecision>(
+      [&tasks, approve = std::move(approve), peer, expires](CallbackCompletion<ApprovalDecision> completion) mutable {
+        const auto scope = UseApplicationTaskScope();
+        tasks.timer = scope.Launch(WaitForApprovalExpiry(expires, completion));
+        tasks.callback = scope.Launch(RunPairingApproval(std::move(approve), peer, expires, completion));
+        return std::function<void()>{};
+      });
+
+  if (decision == ApprovalDecision::Expired) co_return Result::Failure(ApprovalTimedOut());
+  if (decision == ApprovalDecision::Approved) {
+    std::scoped_lock lock(invitation->mutex);
+    invitation->approved_peer = peer;
+  }
+  co_return Result::Success(decision == ApprovalDecision::Approved);
 }
 
 Task<IoResult<Bytes>> ReadTls(std::shared_ptr<TlsSocket> socket, std::stop_token stop, std::size_t maximum) {
@@ -1116,13 +1165,21 @@ Task<NetworkResult<PairedConnection>> AcceptPairedAsync(TcpConnection connection
     } else if (request.front() == detail::pair && policy.offer) {
       const auto offer = detail::PairingAccess::Invitation(*policy.offer);
       if (offer->host == identity.Id() && (offer->purpose.empty() || offer->purpose == purpose)) {
-        allowed = co_await detail::ApproveInvite(offer, authenticated.id, std::span(request).subspan(1), policy.approve);
+        auto approval = co_await detail::ApproveInvite(offer, authenticated.id, std::span(request).subspan(1),
+                                                      std::move(policy.approve));
+        if (!approval.Succeeded()) {
+          mbedtls_platform_zeroize(request.data(), request.size());
+          // Send the existing rejection if the socket is ready. Release this accept without waiting for a write.
+          (void)socket->Write(std::span(&detail::rejected, 1));
+          co_return Result::Failure(std::move(approval).Error());
+        }
+        allowed = approval.Value();
       }
     }
   }
   mbedtls_platform_zeroize(request.data(), request.size());
   if (identity.IsPeerRevoked(authenticated.id)) co_return Result::Failure(detail::PairingRejected());
-  const unsigned char response = allowed ? detail::accepted : 0;
+  const unsigned char response = allowed ? detail::accepted : detail::rejected;
   auto sent = co_await detail::WriteControl(*socket, std::span(&response, 1),
                                              detail::Clock::now() + detail::handshake_timeout);
   if (!sent.Succeeded()) co_return Result::Failure(std::move(sent).Error());

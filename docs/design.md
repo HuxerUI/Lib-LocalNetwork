@@ -192,6 +192,8 @@ Native peers prefer `huxer-lan/2` and retain the `huxer-lan/1` request and invit
 
 Native pairing reports `IncompatibleVersion` when ALPN cannot agree on a pairing version or when decoding an unsupported invitation version. The WSS bridge forwards the version message using its existing protocol error category.
 
+The pairing layer enforces the invitation's approval deadline when it receives the application decision. A timely decision remains valid while the accept task waits to resume. Expiry during approval cancels the application task, returns `TimedOut` to the acceptor, and closes that peer's transport. The listener can issue a fresh invitation and accept another connection. The acceptor attempts to send the existing pairing rejection before closing the transport.
+
 ## Web bridge
 
 The full design includes a user-enabled local native bridge. The browser uses WSS to reach the bridge on the same machine or LAN. The bridge can browse, resolve, and dial within explicitly granted scope, or accept incoming sessions for a registered service. The browser adapter exposes the existing async streams. A control connection manages services and grants. Each session uses a separate data connection. Bound the size of binary messages and use receiver-granted credits so that a slow reader applies backpressure. [WebSocket interface](https://websockets.spec.whatwg.org/#the-websocket-interface)

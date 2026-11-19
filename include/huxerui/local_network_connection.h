@@ -163,7 +163,8 @@ public:
 
   /// @brief Waits for the next connection and completes the selected transport's handshake.
   /// @return A lazy task yielding an owning connection. A concurrent accept returns Busy. Closing the listener
-  /// ends a pending accept with Closed. Cancel the task to stop waiting and keep listening.
+  /// ends a pending accept with Closed. An invitation that expires during approval returns TimedOut and leaves
+  /// the listener open for another accept. Cancel the task to stop waiting and keep listening.
   Task<NetworkResult<Connection>> AcceptAsync();
 
   /// Stops accepting, ends pending handshakes or approvals, and requests withdrawal of all registrations.
