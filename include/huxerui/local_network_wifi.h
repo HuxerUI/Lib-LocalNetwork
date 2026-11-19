@@ -78,8 +78,9 @@ struct WifiNetworkAccess;
 /// @brief Keeps an Android Wi-Fi route available for bound connections.
 ///
 /// Pass this lease through TcpDialOptions::wifi_lease to bind DNS and sockets to that network.
-/// A dial retains the lease for the connection's lifetime. After the system loses the network, obtain a new lease
-/// by joining or selecting the network again. Release all owners to release the system request or observer.
+/// A dial retains the lease until the connection closes. When Android reports network loss, the library closes
+/// TCP and TLS connections bound to the lease. Join or select the network again to obtain a new lease.
+/// Release all owners to release the system request or observer.
 /// Releasing a lease obtained through SelectWifiRouteAsync() leaves the system Wi-Fi association in place.
 class WifiNetworkLease final {
 public:

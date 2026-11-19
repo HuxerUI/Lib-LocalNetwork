@@ -3,8 +3,6 @@
 
 #include "../../../../../src/wifi_backend.h"
 
-#include <atomic>
-
 namespace huxerui::localnetwork::detail {
 namespace {
 
@@ -12,8 +10,12 @@ constexpr char module_name[] = "localnetwork/Wifi";
 
 class WifiModule final : public WifiNetworkState {
 public:
-  explicit WifiModule(PlatformChannel channel) : channel_(std::move(channel)), lost_(std::make_shared<std::atomic_bool>()) {
-    channel_.On("lost", [lost = lost_](const PlatformPayload&) { *lost = true; });
+  explicit WifiModule(PlatformChannel channel) : channel_(std::move(channel)) {
+    channel_.On("lost", [lost = lost_](const PlatformPayload&) {
+      // Closing a socket can release the last owner of this module during notification.
+      auto signal = lost;
+      signal.request_stop();
+    });
   }
   ~WifiModule() override { channel_.Close(); }
 
@@ -29,13 +31,15 @@ public:
   void SetNetwork(std::uint64_t handle) noexcept { network_ = handle; }
 
   std::optional<std::uint64_t> AndroidNetwork() const noexcept override {
-    if (*lost_ || !channel_.IsOpen() || network_ == 0) return std::nullopt;
+    if (lost_.stop_requested() || !channel_.IsOpen() || network_ == 0) return std::nullopt;
     return network_;
   }
 
+  std::stop_token LossToken() const noexcept override { return lost_.get_token(); }
+
 private:
   PlatformChannel channel_;
-  std::shared_ptr<std::atomic_bool> lost_;
+  std::stop_source lost_;
   std::uint64_t network_ = 0;
 };
 

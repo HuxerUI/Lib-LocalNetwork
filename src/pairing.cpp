@@ -486,6 +486,7 @@ public:
 
   int Handshake(bool pairing = false) {
     std::scoped_lock lock(CryptoMutex());
+    if (!IsOpen()) return MBEDTLS_ERR_NET_CONN_RESET;
     const auto result = mbedtls_ssl_handshake(&tls_);
     // Mbed TLS 3.6 reports peer alerts with a generic error. Its input record still holds the alert on return.
     if (pairing && result == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE &&
@@ -498,20 +499,22 @@ public:
   }
   int Read(std::span<unsigned char> bytes) {
     std::scoped_lock lock(CryptoMutex());
-    if (closed_) return MBEDTLS_ERR_NET_CONN_RESET;
+    if (!IsOpen()) return MBEDTLS_ERR_NET_CONN_RESET;
     const auto result = mbedtls_ssl_read(&tls_, bytes.data(), bytes.size());
-    // TLS may retain decrypted data even after TCP closes. A closed session must not deliver it.
-    return closed_ ? MBEDTLS_ERR_NET_CONN_RESET : result;
+    // The Wi-Fi lease may close TCP directly while Mbed TLS still holds decrypted data.
+    return IsOpen() ? result : MBEDTLS_ERR_NET_CONN_RESET;
   }
   int Write(std::span<const unsigned char> bytes) {
     std::scoped_lock lock(CryptoMutex());
-    if (closed_) return MBEDTLS_ERR_NET_CONN_RESET;
-    return mbedtls_ssl_write(&tls_, bytes.data(), bytes.size());
+    if (!IsOpen()) return MBEDTLS_ERR_NET_CONN_RESET;
+    const auto result = mbedtls_ssl_write(&tls_, bytes.data(), bytes.size());
+    return IsOpen() ? result : MBEDTLS_ERR_NET_CONN_RESET;
   }
   int Finish() {
     std::scoped_lock lock(CryptoMutex());
-    return closed_ ? MBEDTLS_ERR_NET_CONN_RESET : mbedtls_ssl_close_notify(&tls_);
+    return IsOpen() ? mbedtls_ssl_close_notify(&tls_) : MBEDTLS_ERR_NET_CONN_RESET;
   }
+  bool IsOpen() const noexcept { return !closed_ && socket_ && socket_->IsOpen(); }
   void Close() noexcept {
     if (!closed_.exchange(true) && socket_) socket_->Close();
   }
@@ -873,6 +876,7 @@ public:
     return IoResult<std::size_t>::Failure({IoErrorCode::Io, "Could not write to WSS TLS."});
   }
 
+  bool IsOpen() const noexcept override { return socket_->IsOpen(); }
   void Close() noexcept override { socket_->Close(); }
 
 private:

@@ -2,6 +2,7 @@
 
 #include <huxerui/local_network_wifi.h>
 
+#include <stop_token>
 #include <string_view>
 #include <utility>
 
@@ -11,6 +12,8 @@ class WifiNetworkState {
 public:
   virtual ~WifiNetworkState() = default;
   virtual std::optional<std::uint64_t> AndroidNetwork() const noexcept = 0;
+  /// Signals permanent loss of this lease. Each new lease has its own signal.
+  virtual std::stop_token LossToken() const noexcept = 0;
 };
 
 struct WifiNetworkAccess {

@@ -188,7 +188,7 @@ bool ValidHost(const std::string& host) noexcept { return !host.empty() && host.
 
 class TcpSocket
 #ifndef __EMSCRIPTEN__
-    final : public SocketIo
+    final : public SocketIo, public std::enable_shared_from_this<TcpSocket>
 #endif
 {
 public:
@@ -207,7 +207,17 @@ public:
     return Adopt(handle);
   }
 
-  void RetainWifiNetwork(std::shared_ptr<const WifiNetworkLease> network) { wifi_network_ = std::move(network); }
+  bool RetainWifiNetwork(std::shared_ptr<const WifiNetworkLease> network) {
+    // Construct the callback before locking. For an already lost lease it closes the socket inline.
+    auto callback = std::make_unique<WifiLossCallback>(WifiNetworkAccess::State(*network)->LossToken(),
+                                                        CloseOnWifiLoss{weak_from_this()});
+    std::scoped_lock lock(mutex_);
+    // Recheck after subscribing. A later notification closes the socket through the callback.
+    if (handle_ == invalid_socket || !network->AndroidNetwork()) return false;
+    wifi_network_ = std::move(network);
+    wifi_loss_callback_ = std::move(callback);
+    return true;
+  }
 
   NetworkResult<void> Listen(const addrinfo& address) {
     const int enabled = 1;
@@ -312,10 +322,7 @@ public:
   IoResult<std::optional<std::size_t>> Receive(std::span<std::byte> bytes) override {
     using Result = IoResult<std::optional<std::size_t>>;
     std::scoped_lock lock(mutex_);
-    if (handle_ == invalid_socket) return Result::Failure({IoErrorCode::Io, "The TCP connection is closed."});
-    if (wifi_network_ && !wifi_network_->AndroidNetwork()) {
-      return Result::Failure({IoErrorCode::Io, "The selected Wi-Fi network was lost."});
-    }
+    if (auto error = StreamError()) return Result::Failure(std::move(*error));
     const auto count = recv(handle_, reinterpret_cast<char*>(bytes.data()), static_cast<int>(bytes.size()), 0);
     if (count >= 0) return Result::Success(static_cast<std::size_t>(count));
     const int error = SocketError();
@@ -325,12 +332,7 @@ public:
 
   IoResult<std::size_t> Send(std::span<const std::byte> bytes) override {
     std::scoped_lock lock(mutex_);
-    if (handle_ == invalid_socket) {
-      return IoResult<std::size_t>::Failure({IoErrorCode::Io, "The TCP connection is closed."});
-    }
-    if (wifi_network_ && !wifi_network_->AndroidNetwork()) {
-      return IoResult<std::size_t>::Failure({IoErrorCode::Io, "The selected Wi-Fi network was lost."});
-    }
+    if (auto error = StreamError()) return IoResult<std::size_t>::Failure(std::move(*error));
     const auto count = send(handle_, reinterpret_cast<const char*>(bytes.data()),
                             static_cast<int>(bytes.size()), send_flags);
     if (count > 0) return IoResult<std::size_t>::Success(static_cast<std::size_t>(count));
@@ -341,23 +343,52 @@ public:
 
   IoResult<void> ShutdownWrite() {
     std::scoped_lock lock(mutex_);
-    if (handle_ == invalid_socket) return IoResult<void>::Failure({IoErrorCode::Io, "The TCP connection is closed."});
+    if (auto error = StreamError()) return IoResult<void>::Failure(std::move(*error));
     if (shutdown(handle_, shutdown_write) == 0) return IoResult<void>::Success();
     return IoResult<void>::Failure(StreamFailure(SocketError(), "Could not close the TCP output."));
   }
 
-  void Close() noexcept override {
-    std::shared_ptr<const WifiNetworkLease> network;
-    {
-      std::scoped_lock lock(mutex_);
-      if (handle_ != invalid_socket) CloseSocket(std::exchange(handle_, invalid_socket));
-      network = std::move(wifi_network_);
-    }
+  bool IsOpen() const noexcept override {
+    std::scoped_lock lock(mutex_);
+    return handle_ != invalid_socket && !WifiLost();
   }
+
+  void Close() noexcept override { CloseSocketAndReleaseWifi(false); }
 
   std::atomic_bool accepting{false};
 
 private:
+  struct CloseOnWifiLoss {
+    std::weak_ptr<TcpSocket> socket;
+    void operator()() const noexcept {
+      if (auto bound = socket.lock()) bound->CloseSocketAndReleaseWifi(true);
+    }
+  };
+  using WifiLossCallback = std::stop_callback<CloseOnWifiLoss>;
+
+  // Caller holds the socket mutex.
+  bool WifiLost() const noexcept { return wifi_lost_ || (wifi_network_ && !wifi_network_->AndroidNetwork()); }
+
+  std::optional<IoError> StreamError() const {
+    if (WifiLost()) return IoError{IoErrorCode::Io, "The selected Wi-Fi network was lost."};
+    if (handle_ == invalid_socket) return IoError{IoErrorCode::Io, "The TCP connection is closed."};
+    return std::nullopt;
+  }
+
+  void CloseSocketAndReleaseWifi(bool network_lost) noexcept {
+    // Unregister before releasing the lease. Callback removal can wait, so destroy both after unlocking.
+    std::shared_ptr<const WifiNetworkLease> network;
+    std::unique_ptr<WifiLossCallback> callback;
+    {
+      std::scoped_lock lock(mutex_);
+      if (handle_ == invalid_socket) return;
+      wifi_lost_ = network_lost;
+      CloseSocket(std::exchange(handle_, invalid_socket));
+      callback = std::move(wifi_loss_callback_);
+      network = std::move(wifi_network_);
+    }
+  }
+
   static NetworkResult<std::shared_ptr<TcpSocket>> Adopt(SocketHandle handle) {
     struct PendingSocket {
       SocketHandle handle;
@@ -382,9 +413,11 @@ private:
   }
 
   // Serialize handle access with Close so a cancelled operation cannot touch a reused descriptor.
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   SocketHandle handle_;
   std::shared_ptr<const WifiNetworkLease> wifi_network_;
+  std::unique_ptr<WifiLossCallback> wifi_loss_callback_;
+  bool wifi_lost_ = false;
 #endif
 };
 
@@ -610,8 +643,8 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
     // Capture the handle used by Connect(), including handles from a Wi-Fi lease or DNS-SD resolution.
     auto path = socket->Path(network);
     if (!path.Succeeded()) co_return Result::Failure(std::move(path).Error());
-    if (lost()) co_return Result::Failure(network_lost);
-    socket->RetainWifiNetwork(options.wifi_lease);
+    if (options.wifi_lease && !socket->RetainWifiNetwork(options.wifi_lease))
+      co_return Result::Failure(network_lost);
     co_return Result::Success(TcpConnection(std::move(socket), std::move(path).Value()));
   }
   co_return Result::Failure(std::move(failure));

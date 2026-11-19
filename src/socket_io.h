@@ -20,6 +20,8 @@ public:
   virtual IoResult<std::optional<std::size_t>> Receive(std::span<std::byte> bytes) = 0;
   /// Returns bytes written. A successful zero means the caller should retry.
   virtual IoResult<std::size_t> Send(std::span<const std::byte> bytes) = 0;
+  /// Checks whether this socket can still be used locally.
+  virtual bool IsOpen() const noexcept = 0;
   /// Releases the socket and ends access from both directions.
   virtual void Close() noexcept = 0;
 };
