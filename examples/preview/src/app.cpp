@@ -7,6 +7,7 @@
 
 #include "file_transfer.h"
 #include "identity_store.h"
+#include "local_network_permissions.h"
 #include "pairing_qr.h"
 #include "wifi_panel.h"
 #include "wifi_platform.h"
@@ -51,6 +52,7 @@ constexpr bool has_pairing_qr = false;
 
 struct PreviewState {
   bool busy = false;
+  bool local_network_permission_denied = false;
   std::string status;
   std::string invitation;
   Bitmap invitation_qr;
@@ -95,6 +97,21 @@ void FinishOperation(const State<PreviewState>& state, std::string status) {
     value.pending_peer.reset();
     value.pairing_answer.reset();
   });
+}
+
+Task<bool> AllowLocalNetwork(State<PreviewState> state) {
+  const auto permission = co_await RequestLocalNetworkAccess();
+  const bool denied = permission == PermissionStatus::Denied;
+  const bool granted = permission == PermissionStatus::Granted;
+  // A retry can be unavailable while a canceled request is still returning from Android's prompt.
+  if ((granted || denied) && state->local_network_permission_denied != denied) {
+    state.Update([&](PreviewState& value) { value.local_network_permission_denied = denied; });
+  }
+  if (granted) co_return true;
+  FinishOperation(state, denied
+      ? "Local network access was denied. Retry or open app permission settings. You can also choose one device in Android."
+      : "Could not request local network access.");
+  co_return false;
 }
 
 Task<bool> ConfirmPairing(State<PreviewState> state, PeerId peer, std::chrono::steady_clock::time_point expires) {
@@ -159,6 +176,28 @@ Task<NetworkResult<Connection>> DialPeer(
   co_return co_await ConnectAsync(std::move(target), std::move(identity), *parsed, std::move(options));
 }
 
+Task<NetworkResult<Connection>> DialPickedPeer(
+    DeviceIdentity identity, std::optional<PeerId> remembered, std::string code, TcpDialOptions options) {
+  using Result = NetworkResult<Connection>;
+  const auto scope = options.wifi_lease ? options.wifi_lease->AndroidNetwork() : std::nullopt;
+  if (options.wifi_lease && !scope)
+    co_return Result::Failure({NetworkErrorCode::NetworkLost, 0, "The Wi-Fi route was lost. Join the hotspot again."});
+  auto picked = co_await PickServiceAsync(service_type, scope);
+  if (!picked.Succeeded()) co_return Result::Failure(std::move(picked).Error());
+  if (!picked.Value()) co_return Result::Failure({NetworkErrorCode::Closed, 0, "No device was selected."});
+  auto service = std::move(*picked.Value());
+  // Dial only addresses returned by Android on its approved network. Keep an explicit Wi-Fi lease when supplied.
+  if (!options.wifi_lease) options.android_network_handle = service.android_network_handle;
+  NetworkError failure{NetworkErrorCode::ConnectionFailed, 0, "Could not reach the selected device."};
+  for (auto& endpoint : service.endpoints) {
+    auto connected = co_await DialPeer(std::move(endpoint), identity, remembered, code, options);
+    if (connected.Succeeded()) co_return connected;
+    failure = std::move(connected).Error();
+    if (failure.code != NetworkErrorCode::ConnectionFailed && failure.code != NetworkErrorCode::TimedOut) break;
+  }
+  co_return Result::Failure(std::move(failure));
+}
+
 struct TemporaryImage {
   File path;
   ~TemporaryImage() { (void)path.Delete(); }
@@ -185,15 +224,16 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
   const bool supported = IsPairingSupported();
   const bool idle = !state->busy && !wifi->busy;
 
-  const auto start = [=](bool listen, Endpoint endpoint, std::string invitation,
-                         std::optional<DiscoveredService> discovered = {}) {
+  const auto start = [=](bool listen, std::optional<Target> target, std::string invitation) {
     if (state->busy || wifi->busy || !state->source) return;
     // Snapshot the route once for this dial. Manual and QR entry share the same paired transport.
     TcpDialOptions options{.wifi_lease = wifi->network};
     state.Update([](PreviewState& value) { value.busy = true; value.status = "Loading the device identity..."; });
-    running = tasks.Launch([=, endpoint = std::move(endpoint), source = *state->source, options = std::move(options),
-                            invitation = std::move(invitation), discovered = std::move(discovered)]() mutable
+    running = tasks.Launch([=, target = std::move(target), source = *state->source, options = std::move(options),
+                            invitation = std::move(invitation)]() mutable
                                -> Task<void> {
+      // The picker obtains access to one device through Android. General local network operations ask separately.
+      if (target && !co_await AllowLocalNetwork(state)) co_return;
       auto identity = co_await LoadIdentity(identity_key, staged_key);
       if (!identity.Succeeded()) {
         FinishOperation(state, FormatError(identity.Error()));
@@ -203,13 +243,16 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
       auto peer_file = co_await remembered_peer.ReadStringAsync();
       const auto remembered = peer_file.Succeeded() ? PeerId::Parse(peer_file.Value()) : std::nullopt;
       state.Update([&](PreviewState& value) {
-        value.status = listen ? "Opening listener..." : discovered ? "Resolving service..." : "Connecting...";
+        if (!target) value.status = "Choose a device in the Android service picker.";
+        else if (listen) value.status = "Opening listener...";
+        else value.status = std::holds_alternative<DiscoveredService>(*target) ? "Resolving service..." : "Connecting...";
       });
       auto local_identity = std::move(identity).Value();
-      auto connect = listen
-          ? ListenForPeer(std::move(endpoint), std::move(local_identity), remembered, state)
-          : DialPeer(discovered ? Target(std::move(*discovered)) : Target(std::move(endpoint)),
-                     std::move(local_identity), remembered, std::move(invitation), std::move(options));
+      auto connect = [&] {
+        if (!target) return DialPickedPeer(std::move(local_identity), remembered, std::move(invitation), std::move(options));
+        if (listen) return ListenForPeer(std::get<Endpoint>(std::move(*target)), std::move(local_identity), remembered, state);
+        return DialPeer(std::move(*target), std::move(local_identity), remembered, std::move(invitation), std::move(options));
+      }();
       auto paired = co_await std::move(connect);
       if (!paired.Succeeded()) {
         FinishOperation(state, FormatError(paired.Error()));
@@ -256,7 +299,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
       FinishOperation(state, "Enter a valid TCP port.");
       return;
     }
-    start(listen, {EndpointHost(host->text), number}, listen ? std::string{} : code->text);
+    start(listen, Target{Endpoint{EndpointHost(host->text), number}}, listen ? std::string{} : code->text);
   };
 
   const auto connect_scanned = [=](IoResult<ScannedInvitation> scanned) {
@@ -268,7 +311,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
     host = TextEditingValue::FromText(invitation.endpoint.host);
     port = TextEditingValue::FromText(std::to_string(invitation.endpoint.port));
     FinishOperation(state, "Connecting to the scanned device...");
-    start(false, std::move(invitation.endpoint), std::move(invitation.code));
+    start(false, Target{std::move(invitation.endpoint)}, std::move(invitation.code));
   };
 
   View invitation_view;
@@ -323,7 +366,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
   for (const auto& service : state->discovered) {
     if (wifi->network && (!leased || service.scope != *leased)) continue;
     device_buttons.push_back(Button(service.display_name).With(Enabled(idle && state->source.has_value()))
-        .OnClick([start, code, service] { start(false, {}, code->text, service); })
+        .OnClick([start, code, service] { start(false, Target{service}, code->text); })
         .Key(service.instance_id + "#" + std::to_string(service.scope)));
   }
 
@@ -380,6 +423,14 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
           FinishOperation(state, "Canceled.");
         }),
       }.With(Spacing(8.0F)),
+      state->local_network_permission_denied ? Button("App permission settings").With(Enabled(idle)).OnClick([=] {
+        state.Update([](PreviewState& value) { value.busy = true; });
+        running = tasks.Launch([state]() -> Task<void> {
+          const bool opened = co_await OpenLocalNetworkPermissionSettings();
+          FinishOperation(state, opened ? "Allow local network access in app permissions, then retry."
+                                        : "Open this app's permissions in Android Settings, then retry.");
+        });
+      }) : View{},
       IsDiscoverySupported() || has_pairing_qr ? Flow {
         Button("Find devices").With(Enabled(IsDiscoverySupported() && idle)).OnClick([=] {
           const auto selected = wifi->network;
@@ -394,6 +445,7 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
             value.status = "Searching the local network...";
           });
           running = tasks.Launch([state, handle]() -> Task<void> {
+            if (!co_await AllowLocalNetwork(state)) co_return;
             auto result = co_await BrowseServicesAsync(service_type, 2500ms, handle);
             if (!result.Succeeded()) {
               FinishOperation(state, handle && result.Error().code == NetworkErrorCode::Unsupported
@@ -410,6 +462,10 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
                 : "Select a discovered device.");
           });
         }),
+        IsServicePickerSupported() ? Button("Choose device in Android")
+            .With(Enabled(supported && idle && state->source.has_value())).OnClick([start, code] {
+              start(false, std::nullopt, code->text);
+            }) : View{},
         Button("Scan QR image").With(Enabled(has_pairing_qr && supported && idle && state->source &&
                                              picker->CanOpenFiles()))
             .OnClick([=] {
@@ -461,6 +517,7 @@ const Application application{
             .initial_size = {560.0F, 680.0F},
         },
         .application_hooks = {huxerui::localnetwork::Install, local_network_preview::InstallQrCamera,
-                              local_network_preview::InstallWifiControls},
+                              local_network_preview::InstallWifiControls,
+                              local_network_preview::InstallLocalNetworkPermissions},
     }
 };

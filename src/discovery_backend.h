@@ -30,6 +30,9 @@ std::vector<unsigned char> EncodeServiceTxt(const ServiceTxt& txt);
 
 #ifdef __ANDROID__
 void InstallPlatformDiscovery(ApplicationContext& context);
+bool IsPlatformServicePickerSupported() noexcept;
+Task<NetworkResult<std::optional<ResolvedService>>> PickPlatformService(
+    std::string type, std::optional<std::uint64_t> android_network_handle);
 #endif
 
 } // namespace huxerui::localnetwork::detail

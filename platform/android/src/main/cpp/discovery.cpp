@@ -1,3 +1,5 @@
+#include <android/api-level.h>
+
 #include <huxerui/android/platform_registry.h>
 #include <huxerui/app.h>
 
@@ -41,6 +43,30 @@ std::shared_ptr<DiscoveryModule> Open() {
   return OpenPlatformModule<std::shared_ptr<DiscoveryModule>>(module_name);
 }
 
+NetworkResult<ResolvedService> DecodeResolution(const PlatformPayload& payload, std::uint64_t fallback_scope = 0) {
+  using Result = NetworkResult<ResolvedService>;
+  const auto& fields = payload.AsObject();
+  const auto port = fields.at("port").AsInteger();
+  if (port <= 0 || port > 65535) return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "Invalid DNS-SD port."});
+  ResolvedService value;
+  const auto network = fields.at("network").AsInteger();
+  if (network != 0) value.android_network_handle = static_cast<std::uint64_t>(network);
+  else if (fallback_scope != 0) value.android_network_handle = fallback_scope;
+  for (const auto& address : fields.at("addresses").AsList()) {
+    value.endpoints.push_back({std::string(address.AsString()), static_cast<std::uint16_t>(port)});
+  }
+  for (const auto& [key, text] : fields.at("txt").AsObject()) {
+    const auto bytes = text.AsBytes();
+    const auto chars = bytes.empty() ? std::string_view{} :
+        std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    InsertServiceTxt(value.txt, key, chars);
+  }
+  if (value.endpoints.empty()) {
+    return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "The service has no usable addresses."});
+  }
+  return Result::Success(std::move(value));
+}
+
 } // namespace
 
 void InstallPlatformDiscovery(ApplicationContext& context) {
@@ -75,26 +101,30 @@ Task<NetworkResult<ResolvedService>> ResolvePlatformService(DiscoveredService se
       {"network", static_cast<std::int64_t>(service.scope)}};
   auto resolved = co_await module->Call("resolve", std::move(request));
   if (const auto* error = std::get_if<PlatformError>(&resolved)) co_return Result::Failure(Failure(*error));
-  const auto& fields = std::get<PlatformPayload>(resolved).AsObject();
-  auto port = fields.at("port").AsInteger();
-  if (port <= 0 || port > 65535) co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "Invalid DNS-SD port."});
-  ResolvedService value;
-  const auto network = fields.at("network").AsInteger();
-  if (network != 0) value.android_network_handle = static_cast<std::uint64_t>(network);
-  else if (service.scope != 0) value.android_network_handle = service.scope;
-  for (const auto& address : fields.at("addresses").AsList()) {
-    value.endpoints.push_back({std::string(address.AsString()), static_cast<std::uint16_t>(port)});
+  co_return DecodeResolution(std::get<PlatformPayload>(resolved), service.scope);
+}
+
+bool IsPlatformServicePickerSupported() noexcept { return android_get_device_api_level() >= 37; }
+
+Task<NetworkResult<std::optional<ResolvedService>>> PickPlatformService(
+    std::string type, std::optional<std::uint64_t> android_network_handle) {
+  using Result = NetworkResult<std::optional<ResolvedService>>;
+  auto module = Open();
+  PlatformPayload request = PlatformPayload::Object{{"type", std::move(type)},
+      {"network", static_cast<std::int64_t>(android_network_handle.value_or(0))}};
+  auto picked = co_await module->Call("pick", std::move(request));
+  if (const auto* error = std::get_if<PlatformError>(&picked)) co_return Result::Failure(Failure(*error));
+  const auto& payload = std::get<PlatformPayload>(picked);
+  if (payload.IsNull()) co_return Result::Success(std::nullopt);
+
+  // Use only the network and addresses delivered by the picker. A discovery scope alone does not grant access.
+  auto resolved = DecodeResolution(payload);
+  if (!resolved.Succeeded()) co_return Result::Failure(std::move(resolved).Error());
+  const auto network = resolved.Value().android_network_handle;
+  if (!network || (android_network_handle && network != android_network_handle)) {
+    co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "The selected service has no matching Android network."});
   }
-  for (const auto& [key, text] : fields.at("txt").AsObject()) {
-    const auto bytes = text.AsBytes();
-    const auto chars = bytes.empty() ? std::string_view{} :
-        std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-    InsertServiceTxt(value.txt, key, chars);
-  }
-  if (value.endpoints.empty()) {
-    co_return Result::Failure({NetworkErrorCode::ResolveFailed, 0, "The service has no usable addresses."});
-  }
-  co_return Result::Success(std::move(value));
+  co_return Result::Success(std::move(resolved).Value());
 }
 
 Task<NetworkResult<std::shared_ptr<PublicationState>>> PublishPlatformService(ServiceAnnouncement announcement) {

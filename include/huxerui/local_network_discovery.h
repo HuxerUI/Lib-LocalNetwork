@@ -180,6 +180,21 @@ Task<NetworkResult<std::vector<DiscoveredService>>> BrowseServicesAsync(
 /// or a NetworkError.
 Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService service);
 
+/// Reports whether the current platform provides the system DNS-SD service picker.
+/// This picker path is available on Android 17 (API level 37) and later.
+bool IsServicePickerSupported() noexcept;
+
+/// @brief Prompts the user to choose a single service and returns its resolved addresses.
+///
+/// Run from a foreground Android application after Install(). The system authorizes access to the selected
+/// addresses on the returned Android network. This operation does not request general local network access.
+/// Canceling the task cancels the platform request. Use the returned addresses and retain their network scope.
+/// @param type TCP service type using the same syntax as BrowseServicesAsync().
+/// @param android_network_handle Optional nonzero Android system network handle to constrain selection.
+/// @return A lazy task yielding the selected service, an empty optional if dismissed, or a NetworkError.
+Task<NetworkResult<std::optional<ResolvedService>>> PickServiceAsync(
+    std::string type, std::optional<std::uint64_t> android_network_handle = {});
+
 /// @brief Publishes an active TCP listener on the local network.
 ///
 /// Windows, macOS, iOS, and Linux publish on the interface that owns the supplied address.

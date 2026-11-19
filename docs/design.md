@@ -280,6 +280,21 @@ Preview advertises the listener as `_huxer-lan._tcp`. To pair from the device li
 
 On 2026-11-16, two Preview instances on one Windows 11 computer tested the device list and a saved invitation image. Each entry completed pairing and exchanged 64 MiB per direction with SHA-256 verification. A fresh browse after the list test returned no services. An Android 16 device successfully registered a Preview service through system NSD before it disconnected from the test host. The Windows–Android Wi-Fi checks for the device list and QR entry remain pending, including optical capture on Android.
 
+### Android 17 local network permission and service picker
+
+Preview targets API 37. On Android 17 and later it checks `ACCESS_LOCAL_NETWORK` before listening, browsing
+the device list, or connecting by a listed service, manual address, or QR invitation. If the user denies access,
+they can retry the operation or use **App permission settings** to grant access and retry after returning.
+Earlier Android releases keep their previous permission and discovery flow. The host application owns the
+permission declaration and request UI. [Android local network permission](https://developer.android.com/privacy-and-security/local-network-permission)
+
+Select **Choose device in Android** to use `PickServiceAsync()` without requesting general access. Enter the
+pairing code first when connecting to a new peer. The system picker authorizes one service and provides its
+resolved addresses on a specific Android network. Preview dials those addresses on that network and uses the
+same TLS pairing and file exchange as the other connection paths. If a Wi-Fi lease is selected, the picker is
+scoped to that lease and Preview keeps it through the connection. Dismissing or canceling the picker leaves
+Preview idle. [Android NSD picker](https://developer.android.com/reference/android/net/nsd/NsdManager)
+
 ### Linux discovery and QR entry
 
 The Linux build enables DNS-SD when `pkg-config` finds the Avahi client development package. Browse, resolve, and publish use the system Avahi service. Preview publishes on the interface that owns its numeric bind address and keeps the interface index in each browse result for resolution. Direct address entry and QR invitations remain available without Avahi. Linux Preview can generate a pairing QR code, save it as a PNG, and open a PNG or JPEG through its file picker. Decoded invitations use the same TLS public-key check and approval as the other platforms.

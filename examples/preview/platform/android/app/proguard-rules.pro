@@ -1,2 +1,3 @@
 -keep class org.huxerui.lib.localnetwork.preview.QrCameraModule { public <init>(); }
 -keep class org.huxerui.lib.localnetwork.preview.WifiControlsModule { public <init>(); }
+-keep class org.huxerui.lib.localnetwork.preview.LocalNetworkPermissionsModule { public <init>(); }

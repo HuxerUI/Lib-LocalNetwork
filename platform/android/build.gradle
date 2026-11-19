@@ -13,7 +13,7 @@ dependencies {
 
 android {
     namespace = "org.huxerui.lib.localnetwork"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 23

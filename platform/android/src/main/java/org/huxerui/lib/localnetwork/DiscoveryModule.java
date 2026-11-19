@@ -1,10 +1,12 @@
 package org.huxerui.lib.localnetwork;
 
+import android.annotation.TargetApi;
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
+import android.net.nsd.DiscoveryRequest;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
@@ -41,6 +43,7 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
         private NsdManager.DiscoveryListener discovery;
         private NsdManager.RegistrationListener registration;
         private NsdManager.ResolveListener resolution;
+        private NsdManager.ServiceInfoCallback picker;
         private WifiManager.MulticastLock multicast;
         private Runnable timeout;
         private boolean disposed;
@@ -65,6 +68,15 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                                 arguments.requireField("milliseconds").requireInt64(),
                                 arguments.requireField("network").requireInt64(), result);
                         break;
+                    case "pick":
+                        if (Build.VERSION.SDK_INT < 37) {
+                            result.fail("localnetwork/discovery-unsupported", "The DNS-SD picker requires Android 17.",
+                                    PlatformPayload.nullValue());
+                            return null;
+                        }
+                        pick(arguments.requireField("type").requireString(),
+                                arguments.requireField("network").requireInt64(), result);
+                        break;
                     case "resolve": resolve(arguments, result); break;
                     case "publish": publish(arguments, result); break;
                     default: fail(result, "Unknown DNS-SD operation."); return null;
@@ -72,7 +84,7 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                 return this::dispose;
             } catch (SecurityException denied) {
                 dispose();
-                result.fail("localnetwork/permission", "The system denied local network access.", PlatformPayload.nullValue());
+                permissionDenied(result);
             } catch (RuntimeException error) {
                 dispose();
                 fail(result, "The system could not start the DNS-SD operation.");
@@ -113,14 +125,18 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                     main.post(() -> {
                         if (discovery != this) return;
                         stopBrowse();
-                        fail(result, "DNS-SD browsing failed (" + error + ").");
+                        failNsd(result, "DNS-SD browsing", error);
                     });
                 }
 
                 @Override public void onStopDiscoveryFailed(String serviceType, int error) {}
                 @Override public void onDiscoveryStopped(String serviceType) {}
             };
-            if (Build.VERSION.SDK_INT >= 33 && network != 0) {
+            if (Build.VERSION.SDK_INT >= 37) {
+                // Snapshot browsing stays separate from the explicit single-service picker.
+                manager.discoverServices(discoveryRequest(type, network, DiscoveryRequest.FLAG_NO_PICKER),
+                        main::post, discovery);
+            } else if (Build.VERSION.SDK_INT >= 33 && network != 0) {
                 manager.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, Network.fromNetworkHandle(network),
                         main::post, discovery);
             } else {
@@ -134,6 +150,41 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
             main.postDelayed(timeout, observation);
         }
 
+        @TargetApi(37)
+        private static DiscoveryRequest discoveryRequest(String type, long network, long flags) {
+            DiscoveryRequest.Builder request = new DiscoveryRequest.Builder(type).setFlags(flags);
+            if (network != 0) request.setNetwork(Network.fromNetworkHandle(network));
+            return request.build();
+        }
+
+        @TargetApi(37)
+        private void pick(String type, long network, HuxerUIPlatformChannel.Result result) {
+            picker = new NsdManager.ServiceInfoCallback() {
+                @Override public void onServiceUpdated(NsdServiceInfo service) {
+                    if (picker != this) return;
+                    // Android unregisters the one-shot callback after delivering the approved service.
+                    picker = null;
+                    result.complete(resolvedPayload(service));
+                }
+
+                @Override public void onServiceInfoCallbackRegistrationFailed(int error) {
+                    if (picker != this) return;
+                    picker = null;
+                    failNsd(result, "DNS-SD service selection", error);
+                }
+
+                @Override public void onServiceInfoCallbackUnregistered() {
+                    if (picker != this) return;
+                    picker = null;
+                    result.complete(PlatformPayload.nullValue());
+                }
+
+                @Override public void onServiceLost() {}
+            };
+            manager.registerServiceInfoCallback(discoveryRequest(type, network, DiscoveryRequest.FLAG_SHOW_PICKER),
+                    main::post, picker);
+        }
+
         @SuppressWarnings("deprecation")
         private void resolve(PlatformPayload arguments, HuxerUIPlatformChannel.Result result) {
             NsdServiceInfo requested = fromArguments(arguments);
@@ -145,7 +196,7 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                         if (resolution != this) return;
                         resolution = null;
                         clearTimeout();
-                        fail(result, "DNS-SD resolution failed (" + error + ").");
+                        failNsd(result, "DNS-SD resolution", error);
                     });
                 }
 
@@ -154,24 +205,7 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                         if (resolution != this) return;
                         resolution = null;
                         clearTimeout();
-                        List<InetAddress> hosts = Build.VERSION.SDK_INT >= 34 ? service.getHostAddresses()
-                                : Collections.singletonList(service.getHost());
-                        List<PlatformPayload> addresses = new ArrayList<>();
-                        for (InetAddress address : hosts) {
-                            if (address != null) addresses.add(PlatformPayload.string(address.getHostAddress()));
-                        }
-                        Map<String, PlatformPayload> fields = new LinkedHashMap<>();
-                        fields.put("port", PlatformPayload.int64(service.getPort()));
-                        fields.put("network", PlatformPayload.int64(networkHandle(service)));
-                        fields.put("addresses", PlatformPayload.list(addresses));
-                        Map<String, PlatformPayload> attributes = new LinkedHashMap<>();
-                        // Keep incoming bytes intact so the common adapter can reject non-text attributes.
-                        for (Map.Entry<String, byte[]> entry : service.getAttributes().entrySet()) {
-                            byte[] value = entry.getValue();
-                            attributes.put(entry.getKey(), PlatformPayload.bytes(value == null ? new byte[0] : value));
-                        }
-                        fields.put("txt", PlatformPayload.object(attributes));
-                        result.complete(PlatformPayload.object(fields));
+                        result.complete(resolvedPayload(service));
                     });
                 }
             };
@@ -181,6 +215,28 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                 fail(result, "DNS-SD resolution timed out.");
             };
             main.postDelayed(timeout, 8000);
+        }
+
+        @SuppressWarnings("deprecation")
+        private static PlatformPayload resolvedPayload(NsdServiceInfo service) {
+            List<InetAddress> hosts = Build.VERSION.SDK_INT >= 34 ? service.getHostAddresses()
+                    : Collections.singletonList(service.getHost());
+            List<PlatformPayload> addresses = new ArrayList<>();
+            for (InetAddress address : hosts) {
+                if (address != null) addresses.add(PlatformPayload.string(address.getHostAddress()));
+            }
+            Map<String, PlatformPayload> attributes = new LinkedHashMap<>();
+            // Keep incoming bytes intact so the common adapter can reject non-text attributes.
+            for (Map.Entry<String, byte[]> entry : service.getAttributes().entrySet()) {
+                byte[] value = entry.getValue();
+                attributes.put(entry.getKey(), PlatformPayload.bytes(value == null ? new byte[0] : value));
+            }
+            Map<String, PlatformPayload> fields = new LinkedHashMap<>();
+            fields.put("port", PlatformPayload.int64(service.getPort()));
+            fields.put("network", PlatformPayload.int64(networkHandle(service)));
+            fields.put("addresses", PlatformPayload.list(addresses));
+            fields.put("txt", PlatformPayload.object(attributes));
+            return PlatformPayload.object(fields);
         }
 
         private void publish(PlatformPayload arguments, HuxerUIPlatformChannel.Result result) {
@@ -210,7 +266,7 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
                         if (registration != this) return;
                         registration = null;
                         clearTimeout();
-                        fail(result, "DNS-SD publication failed (" + error + ").");
+                        failNsd(result, "DNS-SD publication", error);
                     });
                 }
 
@@ -268,6 +324,15 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
             result.fail("localnetwork/discovery", message, PlatformPayload.nullValue());
         }
 
+        private static void permissionDenied(HuxerUIPlatformChannel.Result result) {
+            result.fail("localnetwork/permission", "The system denied local network access.", PlatformPayload.nullValue());
+        }
+
+        private static void failNsd(HuxerUIPlatformChannel.Result result, String operation, int error) {
+            if (Build.VERSION.SDK_INT >= 37 && error == NsdManager.FAILURE_PERMISSION_DENIED) permissionDenied(result);
+            else fail(result, operation + " failed (" + error + ").");
+        }
+
         private void clearTimeout() {
             if (timeout == null) return;
             main.removeCallbacks(timeout);
@@ -295,11 +360,19 @@ public final class DiscoveryModule implements HuxerUIPlatformModule.Factory {
             }
         }
 
+        private void stopPicker() {
+            if (Build.VERSION.SDK_INT < 37 || picker == null) return;
+            NsdManager.ServiceInfoCallback callback = picker;
+            picker = null;
+            try { manager.unregisterServiceInfoCallback(callback); } catch (RuntimeException ignored) {}
+        }
+
         @Override public void dispose() {
             if (disposed) return;
             disposed = true;
             stopBrowse();
             stopResolve();
+            stopPicker();
             NsdManager.RegistrationListener listener = registration;
             registration = null;
             if (listener != null) {

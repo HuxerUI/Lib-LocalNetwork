@@ -219,6 +219,25 @@ Task<NetworkResult<ResolvedService>> ResolveServiceAsync(DiscoveredService servi
   }
 }
 
+bool IsServicePickerSupported() noexcept {
+#ifdef __ANDROID__
+  return detail::IsPlatformServicePickerSupported();
+#else
+  return false;
+#endif
+}
+
+Task<NetworkResult<std::optional<ResolvedService>>> PickServiceAsync(
+    std::string type, std::optional<std::uint64_t> android_network_handle) {
+  using Result = NetworkResult<std::optional<ResolvedService>>;
+  if (!ValidType(type) || android_network_handle == 0) co_return Result::Failure(InvalidService());
+#ifdef __ANDROID__
+  if (IsServicePickerSupported())
+    co_return co_await detail::PickPlatformService(std::move(type), android_network_handle);
+#endif
+  co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "The system DNS-SD picker is unavailable."});
+}
+
 Task<NetworkResult<ServicePublication>> PublishServiceAsync(ServiceAnnouncement announcement) {
   using Result = NetworkResult<ServicePublication>;
   if (!ValidType(announcement.type) || !ValidName(announcement.name) || announcement.endpoint.host.empty() ||
