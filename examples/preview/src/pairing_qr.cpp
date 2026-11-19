@@ -2,14 +2,8 @@
 #include <TargetConditionals.h>
 #endif
 
-#if defined(HUXERUI_LOCALNETWORK_PREVIEW_QR) && defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#elif defined(HUXERUI_LOCALNETWORK_PREVIEW_QR)
-#include <arpa/inet.h>
-#endif
-
 #include "pairing_qr.h"
+#include "listen_addresses.h"
 
 #include <huxerui/resource.h>
 
@@ -39,20 +33,6 @@ constexpr std::string_view prefix = "huxer-lan/1\n";
 constexpr std::size_t max_image_bytes = 24 * 1024 * 1024;
 constexpr std::uint64_t max_image_pixels = 24000000;
 
-bool ConcreteAddress(const std::string& host) {
-  if (host.size() > 45 || host.find('\0') != std::string::npos) return false;
-  in_addr v4{};
-  if (inet_pton(AF_INET, host.c_str(), &v4) == 1) {
-    const auto address = ntohl(v4.s_addr);
-    return address != 0 && (address >> 24) != 127 && (address >> 28) < 14;
-  }
-  in6_addr v6{};
-  // A link-local IPv6 scope is meaningful only on the originating device and cannot be copied through a QR code.
-  return inet_pton(AF_INET6, host.c_str(), &v6) == 1 && !IN6_IS_ADDR_UNSPECIFIED(&v6) &&
-         !IN6_IS_ADDR_LOOPBACK(&v6) && !IN6_IS_ADDR_LINKLOCAL(&v6) && !IN6_IS_ADDR_MULTICAST(&v6) &&
-         !IN6_IS_ADDR_V4MAPPED(&v6);
-}
-
 IoResult<ScannedInvitation> Parse(std::string_view text) {
   using Result = IoResult<ScannedInvitation>;
   const IoError invalid{IoErrorCode::Io, "No LocalNetwork pairing QR code was found."};
@@ -63,7 +43,7 @@ IoResult<ScannedInvitation> Parse(std::string_view text) {
   const std::string host(text.substr(0, host_end));
   text.remove_prefix(host_end + 1);
   const auto port_end = text.find('\n');
-  if (port_end == std::string_view::npos || !ConcreteAddress(host)) return Result::Failure(invalid);
+  if (port_end == std::string_view::npos || !IsInvitationAddress(host)) return Result::Failure(invalid);
   std::uint16_t port{};
   const auto end = text.data() + port_end;
   const auto parsed = std::from_chars(text.data(), end, port);
@@ -142,7 +122,7 @@ private:
 
 Bitmap MakeInvitationQr(const Endpoint& endpoint, std::string_view code) {
 #ifdef HUXERUI_LOCALNETWORK_PREVIEW_QR
-  if (!ConcreteAddress(endpoint.host) || endpoint.port == 0 || !PairingCode::Parse(code)) return {};
+  if (!IsInvitationAddress(endpoint.host) || endpoint.port == 0 || !PairingCode::Parse(code)) return {};
   const auto text = std::string(prefix) + endpoint.host + '\n' + std::to_string(endpoint.port) + '\n' + std::string(code);
   const auto barcode = ZXing::CreateBarcodeFromText(text, ZXing::CreatorOptions(ZXing::BarcodeFormat::QRCode));
   const auto image = ZXing::WriteBarcodeToImage(barcode, ZXing::WriterOptions().scale(6).addQuietZones(true));

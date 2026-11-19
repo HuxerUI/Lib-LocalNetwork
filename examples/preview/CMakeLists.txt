@@ -58,7 +58,7 @@ endif ()
 
 if (WIN32 AND NOT HUXERUI_LIBRARY_GRAPH_ONLY)
     target_compile_definitions(example_local_network PRIVATE NOMINMAX)
-    target_link_libraries(example_local_network PRIVATE crypt32 shell32)
+    target_link_libraries(example_local_network PRIVATE crypt32 shell32 iphlpapi ws2_32)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND NOT HUXERUI_LIBRARY_GRAPH_ONLY)
     enable_language(OBJCXX)
     set(wifi_settings "${CMAKE_CURRENT_SOURCE_DIR}/platform/macos/wifi_settings.mm")

@@ -7,6 +7,7 @@
 
 #include "file_transfer.h"
 #include "identity_store.h"
+#include "listen_addresses.h"
 #include "local_network_permissions.h"
 #include "pairing_qr.h"
 #include "wifi_panel.h"
@@ -57,6 +58,7 @@ struct PreviewState {
   std::string invitation;
   Bitmap invitation_qr;
   std::string publication_status;
+  std::vector<ListenAddress> local_addresses;
   std::vector<DiscoveredService> discovered;
   std::optional<PeerId> pending_peer;
   std::optional<bool> pairing_answer;
@@ -291,6 +293,24 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
     });
   };
 
+  const auto list_addresses = [=] {
+    state.Update([](PreviewState& value) {
+      value.busy = true;
+      value.status = "Listing local addresses...";
+      value.local_addresses.clear();
+    });
+    running = tasks.Launch([state]() -> Task<void> {
+      auto listed = co_await ListListenAddressesAsync();
+      if (!listed.Succeeded()) {
+        FinishOperation(state, FormatError(listed.Error()));
+        co_return;
+      }
+      const bool empty = listed.Value().empty();
+      state.Update([&](PreviewState& value) { value.local_addresses = std::move(listed).Value(); });
+      FinishOperation(state, empty ? "No local addresses found. Enter a bind address manually." : "");
+    });
+  };
+
   const auto manual = [=](bool listen) {
     const auto& text = port->text;
     std::uint16_t number{};
@@ -370,6 +390,14 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
         .Key(service.instance_id + "#" + std::to_string(service.scope)));
   }
 
+  std::vector<View> local_addresses;
+  for (const auto& address : state->local_addresses) {
+    const auto label = address.interface_name.empty() ? address.host : address.host + " (" + address.interface_name + ")";
+    local_addresses.emplace_back(Button(label).With(Enabled(idle))
+        .OnClick([host, address = address.host] { host = TextEditingValue::FromText(address); })
+        .Key(label));
+  }
+
   return ScrollView {
     Column {
       Text("LocalNetwork", TextRole::Title),
@@ -401,6 +429,8 @@ std::string UniqueSuffix() { return std::to_string(std::chrono::steady_clock::no
         }),
       }.With(Spacing(8.0F)),
       Text(state->source_name),
+      supported ? Button("List local addresses").With(Enabled(idle)).OnClick(list_addresses) : View{},
+      local_addresses.empty() ? View{} : Flow(std::move(local_addresses)).With(Spacing(8.0F)),
       Text("Bind address or peer address"),
       TextField(host)
           .InputConfiguration({.type = TextInputType::Url, .autocorrect = false})

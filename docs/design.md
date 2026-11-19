@@ -294,6 +294,8 @@ Both platforms provide `ListenTcpAsync` and `DialTcpAsync` with HuxerUI byte str
 
 In Preview, choose a file on each device or create the 64 MiB sample. On the listening device, enter its bind address and port and select **Listen**. On the dialing device, enter that address and port, paste the displayed pairing code, and select **Connect**. Approve the requesting device on the listener. Preview streams both files concurrently and enables **Save received file** after both devices acknowledge receipt. Leave the code empty to reconnect using the last paired device. Preview protects its saved key with DPAPI on Windows and app-private storage on Android. [Preview entry point](../examples/preview/src/app.cpp)
 
+On native Preview builds, **List local addresses** shows shareable addresses from active interfaces. Select a row to fill the bind address, or type an address in the same field. Refresh the list after changing networks. Use port zero to let the system assign a port. DNS-SD publication and the QR invitation use the listener's actual bound address and port.
+
 On 2026-11-16, a Windows 11 client dialed an Android 16 listener over the same Wi-Fi network. A modified public-key fingerprint was rejected before approval. With a fresh invitation and approval on Android, both devices sent and received 67,108,864 bytes in one TLS session. The SHA-256 hashes of the received files matched the corresponding source files on disk.
 
 ### Windows and Android discovery and QR entry
