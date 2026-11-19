@@ -60,7 +60,7 @@ public:
   AsyncInputStream& Input() noexcept;
   /// Returns the output stream. Await its CloseAsync() to shut down TCP writes and keep reading from the peer.
   AsyncOutputStream& Output() noexcept;
-  /// Returns the actual endpoints recorded when the connection was established.
+  /// Returns the actual endpoints and available route details recorded when the connection was established.
   const ConnectionPath& Path() const noexcept;
   /// Closes both directions without waiting for the peer. Calling this again has no effect.
   void Close() noexcept;

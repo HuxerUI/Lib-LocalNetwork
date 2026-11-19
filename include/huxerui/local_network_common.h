@@ -6,6 +6,7 @@
 /// Link HuxerUI::LocalNetwork. Each capability header exposes these shared declarations.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include <huxerui/data.h>
@@ -60,13 +61,71 @@ struct NetworkError {
 /// Result of a local network operation. Stream operations use IoResult.
 template <class T> using NetworkResult = Result<T, NetworkError>;
 
-/// @brief Actual local and peer endpoints of an established connection.
+/// @brief Route information captured when a connection is established.
 struct ConnectionPath {
-  /// Address and port bound to the socket after establishment.
+  /// Actual local socket address and port. Empty with port zero when the platform does not expose it.
   Endpoint local;
-  /// Address and port of the connected peer.
+  /// Actual address and port of the connected socket peer. Empty with port zero when unavailable.
   Endpoint remote;
+  /// Platform interface index associated with the local socket address, when it can be identified unambiguously.
+  std::optional<std::uint32_t> interface_index;
+  /// Android system network handle used to bind this socket, including handles obtained from Wi-Fi leases.
+  /// Empty for a socket using the system's default route or for an accepted socket without an explicit binding.
+  std::optional<std::uint64_t> android_network_handle;
+  /// True when the byte streams are carried through the WSS bridge.
+  bool via_bridge = false;
 };
+
+/// @brief Platform and build support for a local network operation.
+enum class CapabilityStatus {
+  Unsupported,        ///< The platform or build does not implement the operation.
+  Available,          ///< The operation is implemented and can be attempted with its normal inputs.
+  RequiresPermission, ///< The operation can require a runtime permission or other system authorization.
+  RequiresUserAction, ///< The operation uses system UI or can require an explicit user confirmation.
+};
+
+/// @brief Local network capabilities of the current build and platform.
+struct Capabilities {
+  /// Direct outbound TCP.
+  CapabilityStatus tcp_dial = CapabilityStatus::Unsupported;
+  /// Direct incoming TCP.
+  CapabilityStatus tcp_listen = CapabilityStatus::Unsupported;
+  /// Outbound TLS with platform certificate trust.
+  CapabilityStatus tls_dial = CapabilityStatus::Unsupported;
+  /// Incoming TLS with application-provided server credentials.
+  CapabilityStatus tls_listen = CapabilityStatus::Unsupported;
+  /// Outbound HuxerUI paired TLS.
+  CapabilityStatus paired_tls_dial = CapabilityStatus::Unsupported;
+  /// Incoming HuxerUI paired TLS. The application supplies the pairing approval policy.
+  CapabilityStatus paired_tls_listen = CapabilityStatus::Unsupported;
+  /// Direct DNS-SD browsing, resolution, and publication.
+  CapabilityStatus dns_sd = CapabilityStatus::Unsupported;
+  /// System picker for access to one DNS-SD service.
+  CapabilityStatus dns_sd_picker = CapabilityStatus::Unsupported;
+  /// Nearby Wi-Fi scan. The status covers authorization for a fresh scan.
+  CapabilityStatus wifi_scan = CapabilityStatus::Unsupported;
+  /// Association with a known Wi-Fi hotspot.
+  CapabilityStatus wifi_join = CapabilityStatus::Unsupported;
+  /// Activation of a saved system Wi-Fi profile.
+  CapabilityStatus wifi_join_saved_profile = CapabilityStatus::Unsupported;
+  /// Selection of a Wi-Fi route after joining in system settings.
+  CapabilityStatus wifi_route_selection = CapabilityStatus::Unsupported;
+  /// Outbound TCP binding to an Android network handle or Wi-Fi lease.
+  CapabilityStatus android_network_binding = CapabilityStatus::Unsupported;
+  /// HTTP and HTTPS over an Android Wi-Fi lease.
+  CapabilityStatus wifi_bound_http = CapabilityStatus::Unsupported;
+  /// Desktop WSS bridge hosting.
+  CapabilityStatus web_bridge_host = CapabilityStatus::Unsupported;
+  /// Access to a desktop WSS bridge from the browser.
+  CapabilityStatus web_bridge_client = CapabilityStatus::Unsupported;
+};
+
+/// @brief Reports current platform and build support without prompting or opening a network connection.
+///
+/// Permission and user-action statuses describe prerequisites. The query does not check the current grant,
+/// running system services, hardware, or reachability. Use the operation result to report runtime failures.
+/// @return The capabilities available to this application on the current platform.
+Capabilities GetCapabilities() noexcept;
 
 /// @brief Registers LocalNetwork's platform integration for an application.
 ///

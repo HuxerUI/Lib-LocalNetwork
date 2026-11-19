@@ -49,10 +49,10 @@ public:
   Task<NetResult<Connection>> AcceptAsync();
 };
 
+Capabilities GetCapabilities() noexcept;
+
 class LocalNetwork {
 public:
-  Capabilities GetCapabilities() const;
-
   Task<NetResult<WifiJoinResult>> JoinKnownWifiAsync(WifiJoinRequest request);
   Task<NetResult<NetworkLease>> SelectWifiRouteAsync(WifiSelector selector);
 
@@ -75,6 +75,24 @@ public:
 
 `NetworkError::code` identifies the portable error category. `diagnostic_code` retains a system or TLS library
 error number when one is available.
+
+### Capability and route diagnostics
+
+Call `GetCapabilities()` without opening a connection to discover which operations this build and platform
+provide. `Available` means the operation can be attempted. `RequiresPermission` and `RequiresUserAction`
+identify platform prerequisites such as local network access, an Android service picker, or bridge approval.
+NetworkManager can require authorization for a fresh Wi-Fi scan even when it can return cached results.
+`Unsupported` means the operation has no implementation on that build or system version. This query does
+not inspect current grants, system service health, hardware, or reachability. Existing `Is*Supported()`
+queries remain available for checking individual backends. [Capability API](../include/huxerui/local_network_common.h)
+
+`Path()` captures the local and remote socket endpoints after TCP setup, including for direct and paired TLS.
+The interface index comes from the IPv6 scope or a unique match for the local socket address. It is empty if
+the platform cannot identify a unique interface for that address. On Android, the path records the network
+handle used for an explicit binding, including a handle obtained from a Wi-Fi lease or DNS-SD. It does not
+infer a handle for a default-route socket. Browser streams report `via_bridge` through
+`WebBridgeConnection::Path()`. Their TCP endpoints and interface are unavailable to the browser.
+[Connection path API](../include/huxerui/local_network_common.h)
 
 ### Stream contract
 

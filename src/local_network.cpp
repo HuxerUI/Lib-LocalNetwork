@@ -263,16 +263,18 @@ public:
         SocketFailure(NetworkErrorCode::ConnectionFailed, error, "TCP connection failed."));
   }
 
-  NetworkResult<Endpoint> Address(bool peer) {
-    std::scoped_lock lock(mutex_);
-    if (handle_ == invalid_socket) return NetworkResult<Endpoint>::Failure(ClosedSocket());
+  NetworkResult<Endpoint> Address(bool peer, std::optional<std::uint32_t>* interface_index = nullptr) {
     sockaddr_storage address{};
     auto* sock_address = reinterpret_cast<sockaddr*>(&address);
     AddressSize size = sizeof(address);
-    const int result = peer ? getpeername(handle_, sock_address, &size) : getsockname(handle_, sock_address, &size);
-    if (result != 0) {
-      return NetworkResult<Endpoint>::Failure(
-          SocketFailure(NetworkErrorCode::System, SocketError(), "Could not read the socket endpoint."));
+    {
+      std::scoped_lock lock(mutex_);
+      if (handle_ == invalid_socket) return NetworkResult<Endpoint>::Failure(ClosedSocket());
+      const int result = peer ? getpeername(handle_, sock_address, &size) : getsockname(handle_, sock_address, &size);
+      if (result != 0) {
+        return NetworkResult<Endpoint>::Failure(
+            SocketFailure(NetworkErrorCode::System, SocketError(), "Could not read the socket endpoint."));
+      }
     }
     char host[NI_MAXHOST]{};
     const int formatted = getnameinfo(sock_address, size, host, sizeof(host), nullptr, 0, NI_NUMERICHOST);
@@ -282,15 +284,18 @@ public:
     }
     auto port = address.ss_family == AF_INET ? reinterpret_cast<const sockaddr_in*>(&address)->sin_port
                                             : reinterpret_cast<const sockaddr_in6*>(&address)->sin6_port;
+    if (interface_index) *interface_index = LocalInterfaceIndex(*sock_address);
     return NetworkResult<Endpoint>::Success(Endpoint{host, ntohs(port)});
   }
 
-  NetworkResult<ConnectionPath> Path() {
-    auto local = Address(false);
+  NetworkResult<ConnectionPath> Path(std::optional<std::uint64_t> android_network_handle = {}) {
+    std::optional<std::uint32_t> interface_index;
+    auto local = Address(false, &interface_index);
     if (!local.Succeeded()) return NetworkResult<ConnectionPath>::Failure(std::move(local).Error());
     auto remote = Address(true);
     if (!remote.Succeeded()) return NetworkResult<ConnectionPath>::Failure(std::move(remote).Error());
-    return NetworkResult<ConnectionPath>::Success(ConnectionPath{std::move(local).Value(), std::move(remote).Value()});
+    return NetworkResult<ConnectionPath>::Success(
+        {std::move(local).Value(), std::move(remote).Value(), interface_index, android_network_handle});
   }
 
   NetworkResult<std::shared_ptr<TcpSocket>> TryAccept() {
@@ -602,7 +607,8 @@ Task<NetworkResult<TcpConnection>> DialTcpAsync(Endpoint endpoint, TcpDialOption
       continue;
     }
     if (detail::Clock::now() >= deadline) co_return Result::Failure(timeout);
-    auto path = socket->Path();
+    // Capture the handle used by Connect(), including handles from a Wi-Fi lease or DNS-SD resolution.
+    auto path = socket->Path(network);
     if (!path.Succeeded()) co_return Result::Failure(std::move(path).Error());
     if (lost()) co_return Result::Failure(network_lost);
     socket->RetainWifiNetwork(options.wifi_lease);

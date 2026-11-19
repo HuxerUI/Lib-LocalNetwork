@@ -5,7 +5,12 @@
 
 #include <huxerui/local_network_tcp.h>
 
+struct sockaddr;
+
 namespace huxerui::localnetwork::detail {
+
+/// Looks up the interface of a local socket address without changing the route.
+std::optional<std::uint32_t> LocalInterfaceIndex(const sockaddr& address) noexcept;
 
 /// Nonblocking socket access used by the TLS transport.
 class SocketIo {

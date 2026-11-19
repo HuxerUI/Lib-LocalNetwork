@@ -101,6 +101,8 @@ private:
 
 } // namespace
 
+bool IsBrowserBridgeSupported() noexcept { return emscripten_websocket_is_supported(); }
+
 Task<NetworkResult<std::shared_ptr<BridgeTransport>>> OpenBrowserBridge(std::string url) {
   using Result = NetworkResult<std::shared_ptr<BridgeTransport>>;
   if (url.find_first_of("?#@") != std::string::npos || url.find('\0') != std::string::npos ||
@@ -108,7 +110,7 @@ Task<NetworkResult<std::shared_ptr<BridgeTransport>>> OpenBrowserBridge(std::str
     co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "A valid WSS URL is required."});
   }
   auto socket = std::make_shared<BrowserWebSocket>();
-  if (!emscripten_websocket_is_supported()) {
+  if (!IsBrowserBridgeSupported()) {
     co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "The browser does not support WebSocket."});
   }
   if (!socket->Start(url)) {

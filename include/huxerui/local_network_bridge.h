@@ -63,6 +63,8 @@ public:
   AsyncOutputStream& Output() noexcept;
   /// Returns the peer identifier reported by the authenticated bridge.
   const PeerId& Peer() const noexcept;
+  /// Reports that the stream uses the WSS bridge. The browser does not expose the underlying socket endpoints.
+  const ConnectionPath& Path() const noexcept;
   /// Closes both directions and abandons pending I/O.
   void Close() noexcept;
 

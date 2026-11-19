@@ -52,6 +52,7 @@ struct BridgeAccess {
 };
 
 #ifdef __EMSCRIPTEN__
+bool IsBrowserBridgeSupported() noexcept;
 Task<NetworkResult<std::shared_ptr<BridgeTransport>>> OpenBrowserBridge(std::string url);
 Task<NetworkResult<WebBridgeConnection>> ConnectBrowserBridge(WebBridgeDialOptions options);
 Task<NetworkResult<WebBridgeConnection>> ConnectBrowserData(WebBridgeDialOptions options);

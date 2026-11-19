@@ -44,7 +44,7 @@ public:
   /// Returns the output stream. Await its CloseAsync() to send a TLS close notification. TLS 1.3 lets the
   /// peer continue writing after receiving it. With TLS 1.2, complete the application exchange before closing output.
   AsyncOutputStream& Output() noexcept;
-  /// Returns the actual TCP endpoints established before the TLS handshake.
+  /// Returns the TCP endpoints and available route details recorded before the TLS handshake.
   const ConnectionPath& Path() const noexcept;
   /// Reports whether the peer certificate chain and server name were verified by a TLS dial.
   /// Connections accepted by a TlsListener do not authenticate the client and return false.

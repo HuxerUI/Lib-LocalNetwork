@@ -145,7 +145,7 @@ public:
   AsyncOutputStream& Output() noexcept;
   /// Returns the authenticated peer identity.
   const PeerId& Peer() const noexcept;
-  /// Returns the actual TCP endpoints underlying this session.
+  /// Returns the TCP endpoints and available route details underlying this session.
   const ConnectionPath& Path() const noexcept;
   /// Closes both directions immediately. Additional calls have no effect.
   void Close() noexcept;

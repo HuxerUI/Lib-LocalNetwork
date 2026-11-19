@@ -74,7 +74,7 @@ public:
   AsyncInputStream& Input() noexcept;
   /// Returns the output stream for application bytes.
   AsyncOutputStream& Output() noexcept;
-  /// Returns the actual TCP endpoints recorded by the transport.
+  /// Returns the TCP endpoints and available route details recorded by the transport.
   const ConnectionPath& Path() const noexcept;
   /// Returns the connection's security mode and paired peer identifier, when available.
   SecurityInfo Security() const noexcept;

@@ -228,6 +228,10 @@ WebBridgeConnection::~WebBridgeConnection() { Close(); }
 AsyncInputStream& WebBridgeConnection::Input() noexcept { return input_; }
 AsyncOutputStream& WebBridgeConnection::Output() noexcept { return output_; }
 const PeerId& WebBridgeConnection::Peer() const noexcept { return peer_; }
+const ConnectionPath& WebBridgeConnection::Path() const noexcept {
+  static const ConnectionPath path{.via_bridge = true};
+  return path;
+}
 void WebBridgeConnection::Close() noexcept { if (session_) session_->Close(); }
 
 Task<NetworkResult<WebBridgeConnection>> ConnectWebBridgeAsync(WebBridgeDialOptions options) {

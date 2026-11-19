@@ -24,7 +24,10 @@ bool ValidWifiSsid(std::string_view ssid);
 Task<NetworkResult<WifiScanResult>> ScanPlatformWifi();
 Task<NetworkResult<WifiJoinResult>> JoinPlatformWifi(WifiJoinRequest request);
 #if defined(_WIN32) || defined(HUXERUI_LOCALNETWORK_GIO)
+inline constexpr bool wifi_profile_supported = true;
 Task<NetworkResult<WifiJoinResult>> JoinPlatformWifiProfile(std::string profile);
+#else
+inline constexpr bool wifi_profile_supported = false;
 #endif
 #ifdef __ANDROID__
 Task<NetworkResult<std::shared_ptr<const WifiNetworkLease>>> SelectPlatformWifiRoute(std::string ssid);
