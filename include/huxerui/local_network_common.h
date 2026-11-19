@@ -40,12 +40,13 @@ enum class NetworkErrorCode {
   InvalidIdentity,  ///< A device credential is invalid or could not be created.
   Authentication,   ///< TLS or peer authentication failed.
   PairingRejected,  ///< A pairing invitation or request was rejected.
-  Protocol,         ///< The peer sent an invalid session message.
+  Protocol,         ///< A session protocol message or option is invalid.
   System,           ///< An operation failed without a more specific category.
   DiscoveryFailed,  ///< The platform rejected a DNS-SD operation.
   InvalidWifiConfiguration, ///< A Wi-Fi network name or credential is invalid.
   WifiScanFailed,   ///< The system could not provide nearby Wi-Fi networks.
   WifiJoinFailed,   ///< The system could not join the Wi-Fi network.
+  IncompatibleVersion, ///< The peer or invitation uses an unsupported LocalNetwork pairing version.
 };
 
 /// @brief An operational failure with a portable category and optional system diagnostic.

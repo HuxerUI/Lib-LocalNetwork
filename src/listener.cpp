@@ -1,5 +1,7 @@
 #include <huxerui/local_network_connection.h>
 
+#include "tls_backend.h"
+
 #include <mutex>
 #include <utility>
 
@@ -96,7 +98,7 @@ NetworkResult<PairingOffer> Listener::CreateInvite() {
   if (state_->closed) return Result::Failure(ClosedListener());
   if (!state_->pairing)
     return Result::Failure({NetworkErrorCode::Unsupported, 0, "Invitations require a paired listener."});
-  auto offer = PairingOffer::Create(state_->pairing->identity);
+  auto offer = PairingOffer::Create(state_->pairing->identity, state_->pairing->policy.purpose);
   if (offer.Succeeded()) state_->pairing->policy.offer = offer.Value();
   return offer;
 }
@@ -196,6 +198,8 @@ Task<NetworkResult<Listener>> ListenAsync(ListenOptions options) {
         co_return Result::Failure({NetworkErrorCode::Unsupported, 0, "Paired listeners are unavailable on this platform."});
       if (!pairing)
         co_return Result::Failure({NetworkErrorCode::InvalidIdentity, 0, "A paired listener requires a device identity."});
+      if (auto error = detail::CheckPairingPurpose(pairing->policy.purpose))
+        co_return Result::Failure(std::move(*error));
     } else if (mode != ListenMode::Tcp || pairing) {
       co_return Result::Failure({NetworkErrorCode::InvalidEndpoint, 0, "Invalid listener transport options."});
     }

@@ -171,9 +171,9 @@ Task<NetworkResult<Connection>> DialPeer(
   if (code.empty() && remembered) {
     co_return co_await ConnectAsync(std::move(target), std::move(identity), *remembered, std::move(options));
   }
-  const auto parsed = PairingCode::Parse(code);
-  if (!parsed) co_return Result::Failure({NetworkErrorCode::PairingRejected, 0, "Enter a valid pairing code."});
-  co_return co_await ConnectAsync(std::move(target), std::move(identity), *parsed, std::move(options));
+  auto parsed = PairingCode::Decode(code);
+  if (!parsed.Succeeded()) co_return Result::Failure(std::move(parsed).Error());
+  co_return co_await ConnectAsync(std::move(target), std::move(identity), std::move(parsed).Value(), std::move(options));
 }
 
 Task<NetworkResult<Connection>> DialPickedPeer(

@@ -159,10 +159,12 @@ Bytes AuthorizeDial(HostSession& host, ControlReader& request) {
   if (target == host.policy.dial_targets.end()) return BridgeFailure(Denied());
   PeerCredential credential = peer;
   if (!code.empty()) {
-    const auto parsed = PairingCode::Parse(code);
-    if (!parsed || parsed->Host() != peer)
+    auto parsed = PairingCode::Decode(code);
+    if (!parsed.Succeeded() && parsed.Error().code == NetworkErrorCode::IncompatibleVersion)
+      return BridgeFailure(parsed.Error());
+    if (!parsed.Succeeded() || parsed.Value().Host() != peer)
       return BridgeFailure({NetworkErrorCode::Authentication, 0, "The pairing code does not match the approved peer."});
-    credential = *parsed;
+    credential = std::move(parsed).Value();
   }
   return host.Issue(DialIntent{std::move(endpoint), std::move(credential)});
 }

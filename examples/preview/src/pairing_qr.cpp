@@ -34,6 +34,7 @@ using namespace huxerui;
 using namespace huxerui::localnetwork;
 
 #ifdef HUXERUI_LOCALNETWORK_PREVIEW_QR
+// The QR envelope version is independent of the invitation version carried inside it.
 constexpr std::string_view prefix = "huxer-lan/1\n";
 constexpr std::size_t max_image_bytes = 24 * 1024 * 1024;
 constexpr std::uint64_t max_image_pixels = 24000000;
@@ -52,22 +53,29 @@ bool ConcreteAddress(const std::string& host) {
          !IN6_IS_ADDR_V4MAPPED(&v6);
 }
 
-std::optional<ScannedInvitation> Parse(std::string_view text) {
-  if (!text.starts_with(prefix) || text.size() > 180) return std::nullopt;
+IoResult<ScannedInvitation> Parse(std::string_view text) {
+  using Result = IoResult<ScannedInvitation>;
+  const IoError invalid{IoErrorCode::Io, "No LocalNetwork pairing QR code was found."};
+  if (!text.starts_with(prefix) || text.size() > 256) return Result::Failure(invalid);
   text.remove_prefix(prefix.size());
   const auto host_end = text.find('\n');
-  if (host_end == std::string_view::npos) return std::nullopt;
+  if (host_end == std::string_view::npos) return Result::Failure(invalid);
   const std::string host(text.substr(0, host_end));
   text.remove_prefix(host_end + 1);
   const auto port_end = text.find('\n');
-  if (port_end == std::string_view::npos || !ConcreteAddress(host)) return std::nullopt;
+  if (port_end == std::string_view::npos || !ConcreteAddress(host)) return Result::Failure(invalid);
   std::uint16_t port{};
   const auto end = text.data() + port_end;
   const auto parsed = std::from_chars(text.data(), end, port);
-  if (parsed.ptr != end || parsed.ec != std::errc{} || port == 0) return std::nullopt;
+  if (parsed.ptr != end || parsed.ec != std::errc{} || port == 0) return Result::Failure(invalid);
   text.remove_prefix(port_end + 1);
-  if (!PairingCode::Parse(text)) return std::nullopt;
-  return ScannedInvitation{{host, port}, std::string(text)};
+  const auto code = PairingCode::Decode(text);
+  if (!code.Succeeded()) {
+    if (code.Error().code == NetworkErrorCode::IncompatibleVersion)
+      return Result::Failure({IoErrorCode::Unsupported, code.Error().message});
+    return Result::Failure(invalid);
+  }
+  return Result::Success(ScannedInvitation{{host, port}, std::string(text)});
 }
 
 IoResult<ScannedInvitation> Decode(Bitmap bitmap) {
@@ -77,9 +85,7 @@ IoResult<ScannedInvitation> Decode(Bitmap bitmap) {
   const ZXing::ImageView image(reinterpret_cast<const std::uint8_t*>(pixels.data()), width, height,
                               ZXing::ImageFormat::RGBA);
   const auto found = ZXing::ReadBarcode(image, ZXing::ReaderOptions().setFormats(ZXing::BarcodeFormat::QRCode));
-  if (found.isValid()) {
-    if (auto decoded = Parse(found.text())) return IoResult<ScannedInvitation>::Success(std::move(*decoded));
-  }
+  if (found.isValid()) return Parse(found.text());
   return IoResult<ScannedInvitation>::Failure({IoErrorCode::Io, "No LocalNetwork pairing QR code was found."});
 }
 

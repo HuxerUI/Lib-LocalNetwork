@@ -34,7 +34,21 @@ extern "C" {
 namespace huxerui::localnetwork {
 namespace {
 
-constexpr std::string_view code_prefix = "hln1-";
+constexpr std::string_view legacy_code_prefix = "hln1-";
+constexpr std::string_view scoped_code_prefix = "hln2-";
+constexpr std::size_t max_purpose_size = 64;
+
+bool IsDigit(char ch) { return ch >= '0' && ch <= '9'; }
+
+bool ValidPurpose(std::string_view purpose) {
+  return purpose.size() <= max_purpose_size && std::ranges::all_of(purpose, [](char ch) {
+    return (ch >= 'a' && ch <= 'z') || IsDigit(ch) || ch == '.' || ch == '-' || ch == '_';
+  });
+}
+
+NetworkError InvalidPurpose() {
+  return {NetworkErrorCode::Protocol, 0, "The LocalNetwork pairing purpose is invalid."};
+}
 
 std::string Hex(std::span<const std::uint8_t> bytes) {
   constexpr char digits[] = "0123456789abcdef";
@@ -48,7 +62,7 @@ std::string Hex(std::span<const std::uint8_t> bytes) {
 }
 
 int Digit(char ch) {
-  if (ch >= '0' && ch <= '9') return ch - '0';
+  if (IsDigit(ch)) return ch - '0';
   if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
   if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
   return -1;
@@ -82,19 +96,54 @@ std::optional<PeerId> PeerId::Parse(std::string_view text) {
 }
 
 std::optional<PairingCode> PairingCode::Parse(std::string_view text) {
-  if (!text.starts_with(code_prefix)) return std::nullopt;
-  text.remove_prefix(code_prefix.size());
+  auto code = Decode(text);
+  if (!code.Succeeded()) return std::nullopt;
+  return std::move(code).Value();
+}
+
+NetworkResult<PairingCode> PairingCode::Decode(std::string_view text) {
+  using Result = NetworkResult<PairingCode>;
+  const auto malformed = [] {
+    return Result::Failure({NetworkErrorCode::PairingRejected, 0, "Enter a valid LocalNetwork pairing code."});
+  };
+  const auto scoped = text.starts_with(scoped_code_prefix);
+  if (!scoped && !text.starts_with(legacy_code_prefix)) {
+    const auto separator = text.find('-');
+    if (text.starts_with("hln") && separator != std::string_view::npos && separator > 3 &&
+        std::ranges::all_of(text.substr(3, separator - 3), IsDigit)) {
+      return Result::Failure({NetworkErrorCode::IncompatibleVersion, 0,
+                              "The LocalNetwork pairing code uses an unsupported version. Update the application and try again."});
+    }
+    return malformed();
+  }
+  text.remove_prefix(scoped ? scoped_code_prefix.size() : legacy_code_prefix.size());
   PairingCode code;
   const auto pin_size = code.host_.digest.size() * 2;
-  if (text.size() != pin_size + code.secret_.size() * 2 ||
+  const auto secret_size = code.secret_.size() * 2;
+  const auto credential_size = pin_size + secret_size;
+  if (text.size() < credential_size ||
       !DecodeHex(text.substr(0, pin_size), code.host_.digest) ||
-      !DecodeHex(text.substr(pin_size), code.secret_)) return std::nullopt;
-  return code;
+      !DecodeHex(text.substr(pin_size, secret_size), code.secret_)) return malformed();
+
+  text.remove_prefix(credential_size);
+  if (scoped) {
+    if (text.size() < 2 || text.front() != '-' || !ValidPurpose(text.substr(1))) return malformed();
+    code.purpose_ = text.substr(1);
+  } else if (!text.empty()) {
+    return malformed();
+  }
+  return Result::Success(std::move(code));
 }
 
 const PeerId& PairingCode::Host() const noexcept { return host_; }
+std::string_view PairingCode::Purpose() const noexcept { return purpose_; }
 
 namespace detail {
+
+std::optional<NetworkError> CheckPairingPurpose(std::string_view purpose) {
+  if (ValidPurpose(purpose)) return std::nullopt;
+  return InvalidPurpose();
+}
 
 using Clock = std::chrono::steady_clock;
 using Secret = std::array<std::uint8_t, 16>;
@@ -120,6 +169,7 @@ struct IdentityState {
 struct InvitationState {
   PeerId host;
   Secret secret{};
+  std::string purpose;
 #ifdef HUXERUI_LOCALNETWORK_TLS
   std::mutex mutex;
   Clock::time_point expires;
@@ -147,8 +197,9 @@ struct PairingAccess {
     sessions.sockets.push_back(socket);
     return true;
   }
-  static PairedConnection Connection(std::shared_ptr<TlsSocket> socket, PeerId peer, ConnectionPath path) {
-    return PairedConnection(std::move(socket), peer, std::move(path));
+  static PairedConnection Connection(std::shared_ptr<TlsSocket> socket, PeerId peer, ConnectionPath path,
+                                     std::string purpose) {
+    return PairedConnection(std::move(socket), peer, std::move(path), std::move(purpose));
   }
 };
 
@@ -156,14 +207,21 @@ struct PairingAccess {
 namespace {
 
 using namespace std::chrono_literals;
-constexpr char protocol_name[] = "huxer-lan/1";
-const char* protocols[] = {protocol_name, nullptr};
+constexpr char legacy_protocol[] = "huxer-lan/1";
+constexpr char purpose_protocol[] = "huxer-lan/2";
+const char* pairing_protocols[] = {purpose_protocol, legacy_protocol, nullptr};
+const char* scoped_pairing_protocols[] = {purpose_protocol, nullptr};
 constexpr auto retry_interval = 4ms;
 constexpr auto handshake_timeout = 20s;
 constexpr std::size_t stream_chunk = 64 * 1024;
 constexpr std::uint8_t reconnect = 0;
 constexpr std::uint8_t pair = 1;
 constexpr std::uint8_t accepted = 1;
+
+struct AuthenticatedPeer {
+  PeerId id;
+  bool supports_purpose;
+};
 
 // The default Mbed TLS build shares PSA state without platform mutex callbacks. Serialize its entry points.
 std::mutex& CryptoMutex() { static std::mutex mutex; return mutex; }
@@ -179,6 +237,11 @@ NetworkError CryptoError(NetworkErrorCode code, int error, std::string message) 
 }
 
 NetworkError PairingRejected() { return {NetworkErrorCode::PairingRejected, 0, "Pairing was rejected."}; }
+
+NetworkError IncompatibleProtocol(int diagnostic = 0) {
+  return {NetworkErrorCode::IncompatibleVersion, diagnostic,
+          "The peer uses an incompatible LocalNetwork pairing protocol version. Update both applications and try again."};
+}
 
 int PublicKeyId(const mbedtls_pk_context& key, PeerId& id) {
   std::array<unsigned char, 384> encoded;
@@ -321,7 +384,7 @@ public:
     mbedtls_ssl_config_free(&config_);
   }
 
-  int Configure(bool listener, bool browser = false) {
+  int Configure(bool listener, const char** alpn, bool browser = false) {
     std::scoped_lock lock(CryptoMutex());
     if (!socket_) return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
     auto result = mbedtls_ssl_config_defaults(&config_, listener ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
@@ -336,8 +399,7 @@ public:
 #if defined(MBEDTLS_SSL_SESSION_TICKETS) && defined(MBEDTLS_SSL_CLI_C)
     mbedtls_ssl_conf_session_tickets(&config_, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
 #endif
-    static const char* browser_protocols[] = {"http/1.1", nullptr};
-    result = mbedtls_ssl_conf_alpn_protocols(&config_, browser ? browser_protocols : protocols);
+    result = mbedtls_ssl_conf_alpn_protocols(&config_, alpn);
     if (result != 0) return result;
     result = mbedtls_ssl_conf_own_cert(&config_, &identity_->certificate, &identity_->key);
     if (result != 0) return result;
@@ -396,26 +458,39 @@ public:
     return Result::Success(std::move(chain));
   }
 
-  NetworkResult<PeerId> Peer() {
+  NetworkResult<AuthenticatedPeer> Peer() {
+    using Result = NetworkResult<AuthenticatedPeer>;
     std::scoped_lock lock(CryptoMutex());
-    const auto* certificate = mbedtls_ssl_get_peer_cert(&tls_);
     const auto* alpn = mbedtls_ssl_get_alpn_protocol(&tls_);
+    const auto protocol = alpn ? std::string_view(alpn) : std::string_view{};
+    if (protocol != legacy_protocol && protocol != purpose_protocol) return Result::Failure(IncompatibleProtocol());
+    const auto* certificate = mbedtls_ssl_get_peer_cert(&tls_);
     const auto flags = mbedtls_ssl_get_verify_result(&tls_);
-    if (!certificate || !alpn || std::string_view(alpn) != protocol_name ||
-        (flags & ~static_cast<std::uint32_t>(MBEDTLS_X509_BADCERT_NOT_TRUSTED)) != 0) {
-      return NetworkResult<PeerId>::Failure(CryptoError(
+    if (!certificate || (flags & ~static_cast<std::uint32_t>(MBEDTLS_X509_BADCERT_NOT_TRUSTED)) != 0) {
+      return Result::Failure(CryptoError(
           NetworkErrorCode::Authentication, static_cast<int>(flags), "The TLS peer certificate is invalid."));
     }
     PeerId peer;
     const auto error = PublicKeyId(certificate->pk, peer);
     if (error != 0) {
-      return NetworkResult<PeerId>::Failure(
+      return Result::Failure(
           CryptoError(NetworkErrorCode::Authentication, error, "Could not verify the TLS public key."));
     }
-    return NetworkResult<PeerId>::Success(peer);
+    return Result::Success({peer, protocol == purpose_protocol});
   }
 
-  int Handshake() { std::scoped_lock lock(CryptoMutex()); return mbedtls_ssl_handshake(&tls_); }
+  int Handshake(bool pairing = false) {
+    std::scoped_lock lock(CryptoMutex());
+    const auto result = mbedtls_ssl_handshake(&tls_);
+    // Mbed TLS 3.6 reports peer alerts with a generic error. Its input record still holds the alert on return.
+    if (pairing && result == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE &&
+        tls_.MBEDTLS_PRIVATE(in_msgtype) == MBEDTLS_SSL_MSG_ALERT && tls_.MBEDTLS_PRIVATE(in_msglen) == 2 &&
+        tls_.MBEDTLS_PRIVATE(in_msg) &&
+        tls_.MBEDTLS_PRIVATE(in_msg)[1] == MBEDTLS_SSL_ALERT_MSG_NO_APPLICATION_PROTOCOL) {
+      return MBEDTLS_ERR_SSL_NO_APPLICATION_PROTOCOL;
+    }
+    return result;
+  }
   int Read(std::span<unsigned char> bytes) {
     std::scoped_lock lock(CryptoMutex());
     if (closed_) return MBEDTLS_ERR_NET_CONN_RESET;
@@ -514,14 +589,35 @@ Task<NetworkResult<void>> WriteControl(TlsSocket& socket, std::span<const unsign
   co_return NetworkResult<void>::Success();
 }
 
-Task<NetworkResult<PeerId>> Authenticate(TlsSocket& socket, bool listener, Clock::time_point deadline) {
-  const auto error = socket.Configure(listener);
+Task<NetworkResult<std::string>> ReadPurpose(TlsSocket& socket, Clock::time_point deadline) {
+  using Result = NetworkResult<std::string>;
+  unsigned char size = 0;
+  auto length = co_await ReadControl(socket, std::span(&size, 1), deadline);
+  if (!length.Succeeded()) co_return Result::Failure(std::move(length).Error());
+  if (size > max_purpose_size) co_return Result::Failure(InvalidPurpose());
+
+  std::string purpose(size, '\0');
+  auto bytes = std::span(reinterpret_cast<unsigned char*>(purpose.data()), purpose.size());
+  auto received = co_await ReadControl(socket, bytes, deadline);
+  if (!received.Succeeded()) co_return Result::Failure(std::move(received).Error());
+  if (!ValidPurpose(purpose)) co_return Result::Failure(InvalidPurpose());
+  co_return Result::Success(std::move(purpose));
+}
+
+Task<NetworkResult<AuthenticatedPeer>> Authenticate(TlsSocket& socket, bool listener, bool purpose_required,
+                                                    Clock::time_point deadline) {
+  using Result = NetworkResult<AuthenticatedPeer>;
+  const auto error = socket.Configure(listener, purpose_required ? scoped_pairing_protocols : pairing_protocols);
   if (error != 0) {
-    co_return NetworkResult<PeerId>::Failure(
+    co_return Result::Failure(
         CryptoError(NetworkErrorCode::Authentication, error, "Could not configure the TLS session."));
   }
-  auto handshake = co_await RunControl([&] { return socket.Handshake(); }, deadline, NetworkErrorCode::Authentication);
-  if (!handshake.Succeeded()) co_return NetworkResult<PeerId>::Failure(std::move(handshake).Error());
+  auto handshake = co_await RunControl([&] { return socket.Handshake(true); }, deadline, NetworkErrorCode::Authentication);
+  if (!handshake.Succeeded()) {
+    if (handshake.Error().diagnostic_code == MBEDTLS_ERR_SSL_NO_APPLICATION_PROTOCOL)
+      co_return Result::Failure(IncompatibleProtocol(handshake.Error().diagnostic_code));
+    co_return Result::Failure(std::move(handshake).Error());
+  }
   co_return socket.Peer();
 }
 
@@ -767,7 +863,8 @@ NetworkResult<std::string> GenerateBridgeGrant() {
 Task<NetworkResult<std::shared_ptr<SocketIo>>> AcceptBridgeTls(
     std::shared_ptr<SocketIo> connection, std::shared_ptr<IdentityState> credentials, Clock::time_point deadline) {
   auto socket = std::make_shared<TlsSocket>(std::move(connection), std::move(credentials));
-  if (const auto error = socket->Configure(true, true); error != 0) {
+  static const char* browser_protocols[] = {"http/1.1", nullptr};
+  if (const auto error = socket->Configure(true, browser_protocols, true); error != 0) {
     co_return NetworkResult<std::shared_ptr<SocketIo>>::Failure(
         CryptoError(NetworkErrorCode::Authentication, error, "Could not configure WSS TLS."));
   }
@@ -846,7 +943,13 @@ Task<NetworkResult<Bytes>> DeviceIdentity::ExportPrivateKeyAsync() const {
 PairingOffer::PairingOffer(std::shared_ptr<detail::InvitationState> state) : state_(std::move(state)) {}
 
 NetworkResult<PairingOffer> PairingOffer::Create(const DeviceIdentity& identity) {
+  return Create(identity, {});
+}
+
+NetworkResult<PairingOffer> PairingOffer::Create(const DeviceIdentity& identity, std::string purpose) {
 #ifdef HUXERUI_LOCALNETWORK_TLS
+  if (auto error = detail::CheckPairingPurpose(purpose))
+    return NetworkResult<PairingOffer>::Failure(std::move(*error));
   std::scoped_lock lock(detail::CryptoMutex());
   auto offer = std::make_shared<detail::InvitationState>();
   const auto result = detail::Random(nullptr, offer->secret.data(), offer->secret.size());
@@ -855,6 +958,7 @@ NetworkResult<PairingOffer> PairingOffer::Create(const DeviceIdentity& identity)
         detail::CryptoError(NetworkErrorCode::System, result, "Could not create a pairing invitation."));
   }
   offer->host = identity.Id();
+  offer->purpose = std::move(purpose);
   offer->expires = detail::Clock::now() + std::chrono::minutes(5);
   return NetworkResult<PairingOffer>::Success(PairingOffer(std::move(offer)));
 #else
@@ -863,12 +967,20 @@ NetworkResult<PairingOffer> PairingOffer::Create(const DeviceIdentity& identity)
 }
 
 std::string PairingOffer::Code() const {
-  return std::string(code_prefix) + state_->host.ToString() + Hex(state_->secret);
+  const auto scoped = !state_->purpose.empty();
+  auto code = std::string(scoped ? scoped_code_prefix : legacy_code_prefix) + state_->host.ToString() + Hex(state_->secret);
+  if (scoped) {
+    code += '-';
+    code += state_->purpose;
+  }
+  return code;
 }
 
 #ifdef HUXERUI_LOCALNETWORK_TLS
-PairedConnection::PairedConnection(std::shared_ptr<detail::TlsSocket> socket, PeerId peer, ConnectionPath path)
+PairedConnection::PairedConnection(std::shared_ptr<detail::TlsSocket> socket, PeerId peer, ConnectionPath path,
+                                   std::string purpose)
     : socket_(std::move(socket)), peer_(peer), path_(std::move(path)),
+      purpose_(std::move(purpose)),
       input_(detail::MakeTlsInput(socket_)), output_(detail::MakeTlsOutput(socket_)) {}
 #endif
 
@@ -879,6 +991,7 @@ PairedConnection& PairedConnection::operator=(PairedConnection&& other) noexcept
     socket_ = std::move(other.socket_);
     peer_ = other.peer_;
     path_ = std::move(other.path_);
+    purpose_ = std::move(other.purpose_);
     input_ = std::move(other.input_);
     output_ = std::move(other.output_);
   }
@@ -888,6 +1001,7 @@ PairedConnection::~PairedConnection() { Close(); }
 AsyncInputStream& PairedConnection::Input() noexcept { return input_; }
 AsyncOutputStream& PairedConnection::Output() noexcept { return output_; }
 const PeerId& PairedConnection::Peer() const noexcept { return peer_; }
+std::string_view PairedConnection::Purpose() const noexcept { return purpose_; }
 const ConnectionPath& PairedConnection::Path() const noexcept { return path_; }
 void PairedConnection::Close() noexcept { if (socket_) socket_->Close(); }
 
@@ -901,9 +1015,23 @@ bool IsPairingSupported() noexcept {
 
 Task<NetworkResult<PairedConnection>> ConnectPairedAsync(Endpoint endpoint, DeviceIdentity identity,
                                                          PeerCredential credential, TcpDialOptions options) {
+  return ConnectPairedAsync(std::move(endpoint), std::move(identity), std::move(credential), std::move(options), {});
+}
+
+Task<NetworkResult<PairedConnection>> ConnectPairedAsync(Endpoint endpoint, DeviceIdentity identity,
+                                                         PeerCredential credential, TcpDialOptions options,
+                                                         std::string purpose) {
   using Result = NetworkResult<PairedConnection>;
 #ifdef HUXERUI_LOCALNETWORK_TLS
   const auto* offer = std::get_if<PairingCode>(&credential);
+  if (offer && !offer->Purpose().empty()) {
+    if (purpose.empty()) purpose = offer->Purpose();
+    else if (purpose != offer->Purpose()) {
+      co_return Result::Failure(
+          {NetworkErrorCode::PairingRejected, 0, "The pairing code is for a different connection purpose."});
+    }
+  }
+  if (auto error = detail::CheckPairingPurpose(purpose)) co_return Result::Failure(std::move(*error));
   const auto& expected = offer ? offer->Host() : std::get<PeerId>(credential);
   if (identity.IsPeerRevoked(expected)) co_return Result::Failure(detail::PairingRejected());
   auto dialed = co_await DialTcpAsync(std::move(endpoint), options);
@@ -913,28 +1041,38 @@ Task<NetworkResult<PairedConnection>> ConnectPairedAsync(Endpoint endpoint, Devi
   auto socket = std::make_shared<detail::TlsSocket>(detail::TcpConnectionAccess::TakeSocket(connection),
                                                     detail::PairingAccess::Identity(identity));
   const auto deadline = detail::Clock::now() + detail::handshake_timeout;
-  auto peer = co_await detail::Authenticate(*socket, false, deadline);
+  auto peer = co_await detail::Authenticate(*socket, false, !purpose.empty(), deadline);
   if (!peer.Succeeded()) co_return Result::Failure(std::move(peer).Error());
-  if (peer.Value() != expected) {
+  const auto& authenticated = peer.Value();
+  if (authenticated.id != expected) {
     co_return Result::Failure({NetworkErrorCode::Authentication, 0, "The peer public key does not match."});
   }
-  if (!detail::PairingAccess::Track(identity, peer.Value(), socket)) {
+  if (!detail::PairingAccess::Track(identity, authenticated.id, socket)) {
     co_return Result::Failure(detail::PairingRejected());
   }
-  std::array<unsigned char, 1 + detail::Secret{}.size()> request{};
+  constexpr auto legacy_size = 1 + detail::Secret{}.size();
+  std::array<unsigned char, legacy_size + 1 + max_purpose_size> request{};
   request.front() = offer ? detail::pair : detail::reconnect;
   if (offer) std::ranges::copy(detail::PairingAccess::Proof(*offer), request.begin() + 1);
-  auto sent = co_await detail::WriteControl(*socket, request, deadline);
+  auto request_size = legacy_size;
+  // The negotiated ALPN determines the request size. Version 1 must see its original byte layout.
+  if (authenticated.supports_purpose) {
+    request[legacy_size] = static_cast<unsigned char>(purpose.size());
+    std::ranges::copy(purpose, request.begin() + legacy_size + 1);
+    request_size += 1 + purpose.size();
+  }
+  auto sent = co_await detail::WriteControl(*socket, std::span(request).first(request_size), deadline);
   mbedtls_platform_zeroize(request.data(), request.size());
   if (!sent.Succeeded()) co_return Result::Failure(std::move(sent).Error());
   unsigned char response = 0;
   auto received = co_await detail::ReadControl(*socket, std::span(&response, 1),
                                                 deadline + std::chrono::minutes(5));
   if (!received.Succeeded()) co_return Result::Failure(std::move(received).Error());
-  if (response != detail::accepted || identity.IsPeerRevoked(peer.Value())) {
+  if (response != detail::accepted || identity.IsPeerRevoked(authenticated.id)) {
     co_return Result::Failure(detail::PairingRejected());
   }
-  co_return Result::Success(detail::PairingAccess::Connection(std::move(socket), peer.Value(), std::move(path)));
+  co_return Result::Success(detail::PairingAccess::Connection(
+      std::move(socket), authenticated.id, std::move(path), std::move(purpose)));
 #else
   co_return Result::Failure(Unsupported());
 #endif
@@ -944,35 +1082,53 @@ Task<NetworkResult<PairedConnection>> AcceptPairedAsync(TcpConnection connection
                                                         PairingPolicy policy) {
   using Result = NetworkResult<PairedConnection>;
 #ifdef HUXERUI_LOCALNETWORK_TLS
+  if (auto error = detail::CheckPairingPurpose(policy.purpose)) co_return Result::Failure(std::move(*error));
   auto path = connection.Path();
   auto socket = std::make_shared<detail::TlsSocket>(detail::TcpConnectionAccess::TakeSocket(connection),
                                                     detail::PairingAccess::Identity(identity));
   const auto deadline = detail::Clock::now() + detail::handshake_timeout;
-  auto peer = co_await detail::Authenticate(*socket, true, deadline);
+  auto peer = co_await detail::Authenticate(*socket, true, !policy.purpose.empty(), deadline);
   if (!peer.Succeeded()) co_return Result::Failure(std::move(peer).Error());
-  if (!detail::PairingAccess::Track(identity, peer.Value(), socket)) {
+  const auto& authenticated = peer.Value();
+  if (!detail::PairingAccess::Track(identity, authenticated.id, socket)) {
     co_return Result::Failure(detail::PairingRejected());
   }
+  std::string purpose;
   std::array<unsigned char, 1 + detail::Secret{}.size()> request{};
   auto received = co_await detail::ReadControl(*socket, request, deadline);
-  if (!received.Succeeded()) co_return Result::Failure(std::move(received).Error());
+  if (!received.Succeeded()) {
+    mbedtls_platform_zeroize(request.data(), request.size());
+    co_return Result::Failure(std::move(received).Error());
+  }
+  if (authenticated.supports_purpose) {
+    auto decoded = co_await detail::ReadPurpose(*socket, deadline);
+    if (!decoded.Succeeded()) {
+      mbedtls_platform_zeroize(request.data(), request.size());
+      co_return Result::Failure(std::move(decoded).Error());
+    }
+    purpose = std::move(decoded).Value();
+  }
   bool allowed = false;
-  if (request.front() == detail::reconnect) {
-    allowed = std::ranges::find(policy.trusted_peers, peer.Value()) != policy.trusted_peers.end();
-  } else if (request.front() == detail::pair && policy.offer) {
-    const auto offer = detail::PairingAccess::Invitation(*policy.offer);
-    if (offer->host == identity.Id()) {
-      allowed = co_await detail::ApproveInvite(offer, peer.Value(), std::span(request).subspan(1), policy.approve);
+  // Check the listener's purpose and the invitation's scope before calling the application's approval callback.
+  if (policy.purpose.empty() || policy.purpose == purpose) {
+    if (request.front() == detail::reconnect) {
+      allowed = std::ranges::find(policy.trusted_peers, authenticated.id) != policy.trusted_peers.end();
+    } else if (request.front() == detail::pair && policy.offer) {
+      const auto offer = detail::PairingAccess::Invitation(*policy.offer);
+      if (offer->host == identity.Id() && (offer->purpose.empty() || offer->purpose == purpose)) {
+        allowed = co_await detail::ApproveInvite(offer, authenticated.id, std::span(request).subspan(1), policy.approve);
+      }
     }
   }
   mbedtls_platform_zeroize(request.data(), request.size());
-  if (identity.IsPeerRevoked(peer.Value())) co_return Result::Failure(detail::PairingRejected());
+  if (identity.IsPeerRevoked(authenticated.id)) co_return Result::Failure(detail::PairingRejected());
   const unsigned char response = allowed ? detail::accepted : 0;
   auto sent = co_await detail::WriteControl(*socket, std::span(&response, 1),
                                              detail::Clock::now() + detail::handshake_timeout);
   if (!sent.Succeeded()) co_return Result::Failure(std::move(sent).Error());
-  if (!allowed || identity.IsPeerRevoked(peer.Value())) co_return Result::Failure(detail::PairingRejected());
-  co_return Result::Success(detail::PairingAccess::Connection(std::move(socket), peer.Value(), std::move(path)));
+  if (!allowed || identity.IsPeerRevoked(authenticated.id)) co_return Result::Failure(detail::PairingRejected());
+  co_return Result::Success(detail::PairingAccess::Connection(
+      std::move(socket), authenticated.id, std::move(path), std::move(purpose)));
 #else
   co_return Result::Failure(Unsupported());
 #endif

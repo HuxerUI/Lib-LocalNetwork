@@ -105,6 +105,11 @@ SecurityInfo Connection::Security() const noexcept {
   return {ConnectionSecurity::PlainTcp, {}};
 }
 
+std::string_view Connection::PairingPurpose() const noexcept {
+  const auto* paired = std::get_if<PairedConnection>(&transport_);
+  return paired ? paired->Purpose() : std::string_view{};
+}
+
 Task<IoResult<void>> Connection::ShutdownWriteAsync() { return Output().CloseAsync(); }
 
 Task<NetworkResult<void>> Connection::CloseAsync() {
@@ -118,9 +123,15 @@ void Connection::Close() noexcept {
 
 Task<NetworkResult<Connection>> ConnectAsync(
     Target target, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options) {
+  return ConnectAsync(std::move(target), std::move(identity), std::move(credential), std::move(options), {});
+}
+
+Task<NetworkResult<Connection>> ConnectAsync(
+    Target target, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options, std::string purpose) {
   return DialTarget(std::move(target), std::move(options),
-      [identity = std::move(identity), credential = std::move(credential)](Endpoint endpoint, TcpDialOptions tcp) {
-        return ConnectPairedAsync(std::move(endpoint), identity, credential, std::move(tcp));
+      [identity = std::move(identity), credential = std::move(credential), purpose = std::move(purpose)](
+          Endpoint endpoint, TcpDialOptions tcp) {
+        return ConnectPairedAsync(std::move(endpoint), identity, credential, std::move(tcp), purpose);
       });
 }
 

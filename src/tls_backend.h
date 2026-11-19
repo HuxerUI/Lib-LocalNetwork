@@ -16,6 +16,9 @@ struct TlsServerName {
   std::size_t address_size = 0;
 };
 
+/// Validates an application-supplied pairing purpose. An empty string leaves it unspecified.
+std::optional<NetworkError> CheckPairingPurpose(std::string_view purpose);
+
 Task<NetworkResult<std::shared_ptr<TlsSocket>>> ConnectSystemTls(TcpConnection connection, TlsServerName server);
 Task<NetworkResult<std::shared_ptr<IdentityState>>> PrepareTlsServerCredentials(
     std::string certificate_pem, std::string private_key_pem);

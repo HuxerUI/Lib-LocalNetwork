@@ -78,14 +78,20 @@ private:
 class PairingCode final {
 public:
   /// Parses the complete text from PairingOffer::Code(). The listener checks expiry and redemption during pairing.
-  /// Returns an empty optional on malformed input.
+  /// Returns an empty optional on malformed or unsupported input.
   static std::optional<PairingCode> Parse(std::string_view text);
+  /// Decodes version 1 and version 2 invitation text. Returns IncompatibleVersion for an unsupported version
+  /// or PairingRejected for malformed text.
+  static NetworkResult<PairingCode> Decode(std::string_view text);
   /// Returns the pinned identity expected from the listener's TLS certificate.
   const PeerId& Host() const noexcept;
+  /// Returns the required connection purpose, or an empty view for an unscoped invitation.
+  std::string_view Purpose() const noexcept;
 
 private:
   PeerId host_;
   std::array<std::uint8_t, 16> secret_{};
+  std::string purpose_;
   friend struct detail::PairingAccess;
 };
 
@@ -97,6 +103,12 @@ class PairingOffer final {
 public:
   /// Creates an invitation that expires five minutes after this call. Use the same identity in AcceptPairedAsync().
   static NetworkResult<PairingOffer> Create(const DeviceIdentity& identity);
+  /// @brief Creates a five-minute invitation for the given connection purpose.
+  /// @param identity Identity used by the accepting listener.
+  /// @param purpose Application-defined identifier of up to 64 lowercase ASCII letters, digits, dots, hyphens, or
+  /// underscores. An empty value issues an unscoped invitation readable by older clients.
+  /// @return An invitation, or a NetworkError if the purpose is invalid or the invitation cannot be created.
+  static NetworkResult<PairingOffer> Create(const DeviceIdentity& identity, std::string purpose);
   /// Returns the secret-bearing text to show or copy for the user. Exclude it from logs.
   std::string Code() const;
 
@@ -123,6 +135,10 @@ struct PairingPolicy {
   std::optional<PairingOffer> offer;
   /// UI callback for a new approval request. Leave it empty to reject new peers.
   PairingApproval approve;
+  /// Required connection purpose, with the same syntax as PairingOffer::Create(). An empty value leaves the listener
+  /// unrestricted by purpose. A nonempty value requires pairing protocol version 2 and an exact match for both
+  /// first-time pairing and reconnects. A scoped invitation also requires its own purpose to match during pairing.
+  std::string purpose;
 };
 
 /// @brief An authenticated TLS 1.3 session with independent, concurrent input and output.
@@ -145,16 +161,20 @@ public:
   AsyncOutputStream& Output() noexcept;
   /// Returns the authenticated peer identity.
   const PeerId& Peer() const noexcept;
+  /// Returns the accepted connection purpose. An empty view means it was unspecified or the session used version 1.
+  /// The application still owns authorization for its operations.
+  std::string_view Purpose() const noexcept;
   /// Returns the TCP endpoints and available route details underlying this session.
   const ConnectionPath& Path() const noexcept;
   /// Closes both directions immediately. Additional calls have no effect.
   void Close() noexcept;
 
 private:
-  PairedConnection(std::shared_ptr<detail::TlsSocket> socket, PeerId peer, ConnectionPath path);
+  PairedConnection(std::shared_ptr<detail::TlsSocket> socket, PeerId peer, ConnectionPath path, std::string purpose);
   std::shared_ptr<detail::TlsSocket> socket_;
   PeerId peer_;
   ConnectionPath path_;
+  std::string purpose_;
   AsyncInputStream input_;
   AsyncOutputStream output_;
   friend struct detail::PairingAccess;
@@ -167,6 +187,7 @@ bool IsPairingSupported() noexcept;
 /// @brief Dials the endpoint and authenticates it with a remembered identity or pairing code.
 ///
 /// Validates the listener's public key against the credential before sending any invitation secret.
+/// Uses the invitation's purpose when the code carries one.
 /// For a new pairing, the task waits for the listener's decision. Save Peer() after success to reconnect later.
 /// A peer revoked on this identity is rejected, including when a valid pairing code is supplied.
 /// @param endpoint Peer address and port obtained separately from the credential.
@@ -177,13 +198,24 @@ bool IsPairingSupported() noexcept;
 Task<NetworkResult<PairedConnection>> ConnectPairedAsync(
     Endpoint endpoint, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options = {});
 
+/// @brief Dials and requests a specific purpose during paired TLS setup.
+/// @param endpoint Peer address and port obtained separately from the credential.
+/// @param identity Local device identity used for TLS client authentication.
+/// @param credential Expected peer identity or pairing code. An explicit purpose must match a scoped code.
+/// @param options TCP deadline and optional Android network handle or Wi-Fi lease.
+/// @param purpose Application-defined identifier with the same syntax as PairingOffer::Create(). Empty uses the
+/// purpose of a scoped code, when present. A nonempty effective purpose requires pairing protocol version 2.
+/// @return A lazy task yielding an authenticated connection or a NetworkError.
+Task<NetworkResult<PairedConnection>> ConnectPairedAsync(
+    Endpoint endpoint, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options, std::string purpose);
+
 /// @brief Upgrades an accepted TCP connection to TLS and authorizes the peer before exposing application bytes.
 ///
 /// Save Peer() after success if the application should allow future reconnects from this device.
 /// A peer revoked on this identity is rejected even if the policy trusts its public key.
 /// @param connection A newly accepted connection with both streams still unused.
 /// @param identity Local identity used for TLS server authentication.
-/// @param policy Remembered peers, optional invitation, and user approval callback.
+/// @param policy Remembered peers, optional invitation, user approval callback, and required connection purpose.
 /// @return A lazy task yielding an authenticated connection or a NetworkError. Failure closes the transport.
 Task<NetworkResult<PairedConnection>> AcceptPairedAsync(
     TcpConnection connection, DeviceIdentity identity, PairingPolicy policy);

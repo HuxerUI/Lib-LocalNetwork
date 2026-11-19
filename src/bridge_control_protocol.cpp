@@ -84,7 +84,9 @@ NetworkError BridgeProtocolError() { return {NetworkErrorCode::Protocol, 0, "Inv
 
 Bytes BridgeFailure(const NetworkError& error) {
   ControlWriter reply(BridgePacket::Failure);
-  reply.Write(static_cast<std::uint32_t>(error.code));
+  // Existing WSS clients recognize the original error range. Forward version details in the message.
+  const auto code = error.code == NetworkErrorCode::IncompatibleVersion ? NetworkErrorCode::Protocol : error.code;
+  reply.Write(static_cast<std::uint32_t>(code));
   reply.Write(static_cast<std::uint32_t>(error.diagnostic_code));
   reply.Write(std::string_view(error.message).substr(0, 512));
   return std::move(reply).Take();

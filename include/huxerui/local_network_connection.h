@@ -78,6 +78,8 @@ public:
   const ConnectionPath& Path() const noexcept;
   /// Returns the connection's security mode and paired peer identifier, when available.
   SecurityInfo Security() const noexcept;
+  /// Returns the accepted purpose for paired TLS. Other transports and unspecified purposes return an empty view.
+  std::string_view PairingPurpose() const noexcept;
   /// Finishes the output stream and signals end of output to the peer. Complete the application exchange first
   /// when using TLS 1.2, whose closure alert ends the session.
   Task<IoResult<void>> ShutdownWriteAsync();
@@ -101,7 +103,7 @@ enum class ListenMode {
 struct PairedListenOptions {
   /// Device identity presented to dialing peers. Copies share revocations with the application.
   DeviceIdentity identity;
-  /// Remembered peers, optional existing invitation, and approval callback for new peers.
+  /// Remembered peers, optional invitation, approval callback, and any required connection purpose.
   /// The callback runs in the application task scope. Capture any UI state or services it needs.
   PairingPolicy policy;
 };
@@ -153,6 +155,7 @@ public:
   /// @brief Creates a five-minute invitation for a paired listener.
   ///
   /// Share the code through a trusted exchange and supply LocalEndpoint() to the dialing peer separately.
+  /// The invitation carries the listener's required connection purpose, when configured.
   /// A successful call replaces the invitation used by subsequent TCP accepts. An accept already authenticating
   /// a peer keeps its original policy.
   /// @return An invitation, Closed for a closed listener, or Unsupported for a listener in another mode.
@@ -194,6 +197,17 @@ Task<NetworkResult<Listener>> ListenAsync(ListenOptions options);
 /// @return A lazy task yielding an authenticated connection or a NetworkError.
 Task<NetworkResult<Connection>> ConnectAsync(
     Target target, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options = {});
+
+/// @brief Connects to a HuxerUI peer and requests a purpose during paired TLS setup.
+/// @param target Explicit address or DNS-SD service reference.
+/// @param identity Local device identity used for TLS client authentication.
+/// @param credential Expected peer identity or pairing code. An explicit purpose must match a scoped code.
+/// @param options TCP deadline per endpoint and optional Android routing constraint.
+/// @param purpose Application-defined identifier with the same syntax as PairingOffer::Create(). Empty uses the
+/// purpose of a scoped code, when present. A nonempty effective purpose requires pairing protocol version 2.
+/// @return A lazy task yielding an authenticated connection or a NetworkError.
+Task<NetworkResult<Connection>> ConnectAsync(
+    Target target, DeviceIdentity identity, PeerCredential credential, TcpDialOptions options, std::string purpose);
 
 /// @brief Dials an accessory using platform-trusted TLS or explicitly selected plain TCP.
 ///

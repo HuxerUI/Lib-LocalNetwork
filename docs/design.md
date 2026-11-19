@@ -188,6 +188,10 @@ An address locates a device. A public key identifies it. Each installation holds
 
 TLS provides encryption and proof of key possession. The library protocol defines version negotiation, connection purpose, and pairing control messages. Negotiate the major version through ALPN for native sessions. Apply limits to message size, handshake and approval deadlines, and the number of unauthenticated connections. Report incompatible versions explicitly. Run protocol contract tests against native and bridge implementations. File metadata, terminal messages, and AgentKit calls carry their own application protocol versions. [TLS 1.3 specification](https://www.rfc-editor.org/info/rfc9846/)
 
+Native peers prefer `huxer-lan/2` and retain the `huxer-lan/1` request and invitation formats for compatibility with older peers. Version 2 appends a one-byte purpose length and up to 64 bytes of an application-defined ASCII identifier to the encrypted pairing request. A zero length leaves the purpose unspecified. A listener can require one purpose for enrollment and reconnects. A scoped invitation carries that purpose and the dialer uses it automatically. An explicit purpose requires version 2. The purpose identifies the application protocol the peer wants to use. The application still authorizes individual operations.
+
+Native pairing reports `IncompatibleVersion` when ALPN cannot agree on a pairing version or when decoding an unsupported invitation version. The WSS bridge forwards the version message using its existing protocol error category.
+
 ## Web bridge
 
 The full design includes a user-enabled local native bridge. The browser uses WSS to reach the bridge on the same machine or LAN. The bridge can browse, resolve, and dial within explicitly granted scope, or accept incoming sessions for a registered service. The browser adapter exposes the existing async streams. A control connection manages services and grants. Each session uses a separate data connection. Bound the size of binary messages and use receiver-granted credits so that a slow reader applies backpressure. [WebSocket interface](https://websockets.spec.whatwg.org/#the-websocket-interface)
