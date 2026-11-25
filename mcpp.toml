@@ -1,0 +1,88 @@
+[package]
+namespace   = "huxerui"
+name        = "localnetwork"
+version     = "0.1.0"
+standard    = "c++23"
+description = "Local network discovery, pairing, TCP/TLS transport, and Wi-Fi operations for HuxerUI"
+license     = "MIT"
+repo        = "https://github.com/HuxerUI/Lib-LocalNetwork"
+
+[package.metadata.huxerui]
+library   = "HuxerUI::LocalNetwork"
+name      = "localnetwork"
+id        = "org.huxerui.lib.localnetwork"
+namespace = "huxerui::localnetwork"
+resources = "resources"
+
+[dependencies]
+huxerui.huxerui = "0.5.5"
+compat.mbedtls  = "3.6.8"
+
+[targets.huxerui_localnetwork]
+kind = "lib"
+
+[lib]
+path = "modules/localnetwork.cppm"
+
+[build]
+sources              = []
+include_dirs         = ["include", "src"]
+private_include_dirs = ["src"]
+
+[target.'cfg(all(os = "linux", not(env = "android")))'.build]
+sources = [
+    "platform/linux/src/discovery.cpp",
+    "platform/linux/src/tls_trust.cpp",
+    "platform/linux/src/wifi.cpp",
+]
+defines = ["HUXERUI_LOCALNETWORK_TLS"]
+
+[target.macos.build]
+sources = [
+    "platform/macos/src/discovery.cpp",
+    "platform/macos/src/tls_trust.cpp",
+    "platform/macos/src/wifi.mm",
+]
+defines  = ["HUXERUI_LOCALNETWORK_TLS"]
+cxxflags = ["-fobjc-arc"]
+
+[target.macos.runtime]
+frameworks = ["CoreWLAN", "CoreLocation", "Security", "CoreFoundation"]
+
+[target.windows.build]
+sources = [
+    "platform/windows/src/discovery.cpp",
+    "platform/windows/src/tls_trust.cpp",
+    "platform/windows/src/wifi.cpp",
+]
+defines = ["NOMINMAX", "HUXERUI_LOCALNETWORK_TLS"]
+
+[target.windows.runtime]
+libraries = ["ws2_32", "dnsapi", "iphlpapi", "wlanapi", "crypt32"]
+
+[target.'cfg(env = "android")'.build]
+sources = [
+    "platform/android/src/main/cpp/discovery.cpp",
+    "platform/android/src/main/cpp/tls_trust.cpp",
+    "platform/android/src/main/cpp/wifi.cpp",
+]
+defines = ["HUXERUI_LOCALNETWORK_TLS"]
+
+[target.'cfg(env = "android")'.runtime]
+libraries = ["android"]
+
+[target.'cfg(os = "ios")'.build]
+sources = [
+    "platform/ios/src/discovery.cpp",
+    "platform/ios/src/tls_trust.cpp",
+    "platform/ios/src/wifi.mm",
+]
+defines  = ["HUXERUI_LOCALNETWORK_TLS"]
+cxxflags = ["-fobjc-arc"]
+
+[target.'cfg(os = "ios")'.runtime]
+frameworks = ["NetworkExtension", "Security", "CoreFoundation"]
+
+[target.'cfg(os = "emscripten")'.build]
+sources = ["platform/web/src/bridge.cpp"]
+ldflags = ["-lwebsocket.js"]
