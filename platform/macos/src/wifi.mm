@@ -9,7 +9,7 @@ namespace {
 bool LocationAllowed() {
   CLLocationManager* location = [[CLLocationManager alloc] init];
   const auto status = location.authorizationStatus;
-  return status == kCLAuthorizationStatusAuthorizedAlways || status == kCLAuthorizationStatusAuthorizedWhenInUse;
+  return status == kCLAuthorizationStatusAuthorizedAlways;
 }
 
 std::string Ssid(NSData* data) {
