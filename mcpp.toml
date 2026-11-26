@@ -1,7 +1,7 @@
 [package]
 namespace   = "huxerui"
 name        = "localnetwork"
-version     = "0.1.0"
+version     = "0.1.1"
 standard    = "c++23"
 description = "Local network discovery, pairing, TCP/TLS transport, and Wi-Fi operations for HuxerUI"
 license     = "MIT"
